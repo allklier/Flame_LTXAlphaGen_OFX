@@ -9,9 +9,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence gate" ON)
-# Release version (v0.1 = first release, user 2026-10-11; the prototypes reported 0.3.0).
+# Release version (v0.1 = first release 2026-10-11; 0.1.1 = SETUP REQUIRED on the image output).
 # Also the OFX plugin version (major.minor) and the release package name.
-set(LTXAG_VERSION "0.1.0")
+set(LTXAG_VERSION "0.1.1")
 string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
 list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
 list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)

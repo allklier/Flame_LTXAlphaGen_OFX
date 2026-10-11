@@ -114,10 +114,15 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
 - **26.** No resolution cap and no scaling inside the OFX. VRAM is the only limit.
 - **30.** Chunks of 145 frames, overlap ≥ 24, linear crossfade at the middle of the overlap.
 - **48.** Flame forces an RGBA output; alpha (Flame's matte output) carries the matte or marker.
+- **59.** **SETUP REQUIRED shows on both outputs.** A node viewed on its image output (often
+  Flame's default) must not look like a working pass-through before Setup is complete, so the
+  image output shows the marker too (grey on black). In every other state the image is the
+  source with the overlay (58), plain where there is no matte. Added in 0.1.1, from the v0.1
+  acceptance test.
 - **58.** **The image output is a matte overlay:** source × (1 − 0.3·m) + magenta (1, 0, 1) ×
   0.3·m per RGB channel, in the source's own colour space (`overlayPixel`, `marker.h`, tested in
-  `marker_log`; 50% was too opaque). Frames without a matte show the plain source. Render-only:
-  the cache key is unchanged.
+  `marker_log`; 50% was too opaque). Frames without a matte show the plain source (except SETUP
+  REQUIRED, decision 59). Render-only: the cache key is unchanged.
 
 **UI**
 - **37/52.** Layout follows Flame's observed rules (see "Flame host behaviour"). Tab 1 holds
@@ -191,7 +196,7 @@ Flame Python hook: polls refresh markers → steps the current frame and back
   nvidia-smi).
 - `third_party/openfx`: OpenFX `OFX_Release_1_4_TAG`, `include/` + `Support/` only (BSD,
   `VENDORED.txt`).
-- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.0; the OFX
+- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.1; the OFX
   version is its major.minor), grouping "LTX". `LTXAG_DEV_BUILD=ON` (the CMake default, for local
   tests) adds a Prototype page: Sim Seconds, Simulate, Sim VRAM GB, Worker Python, Enforce Gate,
   Auto Refresh, Use Dummy. Release builds (`OFF`) hide those params but still define them, so

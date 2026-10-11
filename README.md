@@ -80,8 +80,8 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 3. Run the installer with sudo (it writes to `/usr/OFX/Plugins`):
 
    ```
-   tar xzf LTXAlphaGen-0.1.0-rocky9.tar.gz
-   cd LTXAlphaGen-0.1.0
+   tar xzf LTXAlphaGen-0.1.1-rocky9.tar.gz
+   cd LTXAlphaGen-0.1.1
    sudo ./install.sh
    ```
 
@@ -113,7 +113,7 @@ the node before Setup is complete.
 ## Setup
 
 Setup runs once per user, from the node's **Setup** tab. Until it has finished, the node shows
-`SETUP REQUIRED` and Process is disabled.
+`SETUP REQUIRED` on both its image and matte outputs, and Process is disabled.
 
 ### 1. Accept the licence
 
@@ -212,7 +212,8 @@ shared by all your nodes and projects; the others are saved with each node.
 - **Show Marker**: on frames without a matte, the matte output shows faint diagonal stripes with
   a caption: `NOT PROCESSED`, `PROCESSING`, `FAILED`, `CANCELLED`, `SETUP REQUIRED`,
   `NOT CONNECTED` or `NOT SUPPORTED`. Off: such frames are plain black. Frames with a matte are
-  not affected, and the image output never shows the marker.
+  not affected. The image output shows the plain source on such frames, except
+  `SETUP REQUIRED`, which shows on the image output as well.
 
 ### Performance
 

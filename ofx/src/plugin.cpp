@@ -390,8 +390,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const OfxRectI db = out->getBounds();
     OfxRectI sb = db;
     std::unique_ptr<OFX::Image> src;
+    const bool setupRequired = gateClosed();
 
-    if (gateClosed()) {
+    if (setupRequired) {
       message = "Setup required: see the Licence and Models columns.";
       caption = "SETUP REQUIRED";
     } else {
@@ -443,8 +444,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     // Flame always gives an RGBA output and shows it as an image output plus a matte output
     // (decision 43 attempt failed). Decision 48: the alpha (Flame's matte output) carries the
     // matte or marker. Decision 58: the image is the source with the matte overlaid in magenta
-    // at 30% (overlayPixel, marker.h); frames without a matte show the plain
-    // source. A 1-channel output gets the matte.
+    // at 30% (overlayPixel, marker.h); frames without a matte show the plain source, except
+    // SETUP REQUIRED, which shows the marker on the image too (decision 59: a node viewed on its
+    // image output must not look like a working pass-through). A 1-channel output gets the matte.
     const bool rgbFromSource = src && src->getPixelDepth() == OFX::eBitDepthFloat;
     const OfxRectI& win = args.renderWindow;
     const int comps = dst_->getPixelComponents() == OFX::ePixelComponentRGBA  ? 4
@@ -469,8 +471,12 @@ class AlphaGenEffect : public OFX::ImageEffect {
         const float* sp = (rgbFromSource && inside)
                               ? static_cast<const float*>(src->getPixelAddress(x, y))
                               : nullptr;
-        static const float kBlack[3] = {0.0f, 0.0f, 0.0f};
-        overlayPixel(sp ? sp : kBlack, realMatte ? v : 0.0f, px);
+        if (setupRequired) {
+          px[0] = px[1] = px[2] = v;  // the marker, grey on black
+        } else {
+          static const float kBlack[3] = {0.0f, 0.0f, 0.0f};
+          overlayPixel(sp ? sp : kBlack, realMatte ? v : 0.0f, px);
+        }
         px += 3;
         if (comps == 4) *px++ = v;
       }
