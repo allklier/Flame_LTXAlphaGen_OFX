@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -65,6 +66,20 @@ int main() {
       countValues(k, s, t, o);
       CHECK(t > 0, "caption %s rendered nothing", cap);
     }
+  }
+
+  // Overlay (decision 58): m=0 is the source, m=1 is 70/30 with magenta, linear in between.
+  {
+    const float src[3] = {0.2f, 0.6f, 0.4f};
+    float o[3];
+    overlayPixel(src, 0.0f, o);
+    CHECK(o[0] == 0.2f && o[1] == 0.6f && o[2] == 0.4f, "m=0 changed the source");
+    overlayPixel(src, 1.0f, o);
+    CHECK(std::abs(o[0] - 0.44f) < 1e-6f && std::abs(o[1] - 0.42f) < 1e-6f && std::abs(o[2] - 0.58f) < 1e-6f,
+          "m=1 gave %g %g %g", o[0], o[1], o[2]);
+    overlayPixel(src, 0.5f, o);
+    CHECK(std::abs(o[0] - 0.32f) < 1e-6f && std::abs(o[1] - 0.51f) < 1e-6f && std::abs(o[2] - 0.49f) < 1e-6f,
+          "m=0.5 gave %g %g %g", o[0], o[1], o[2]);
   }
 
   // Log: format, level filter, correlation ids, rotation.

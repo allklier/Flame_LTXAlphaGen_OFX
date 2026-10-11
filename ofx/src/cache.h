@@ -34,6 +34,12 @@ bool readMatte(const std::string& root, const std::string& key, uint32_t w, uint
 // True while a live job holds the key's pending marker.
 bool isPending(const std::string& root, const std::string& key);
 
+// Written by the plugin just before it launches a job (with Flame's pid), so a render that
+// arrives before job.py has marked the keys still shows PROCESSING; job.py then rewrites them
+// with its own pid and removes them at the end. clearPending undoes it if the launch fails.
+void markPending(const std::string& root, const std::vector<std::string>& keys, int pid);
+void clearPending(const std::string& root, const std::vector<std::string>& keys);
+
 size_t purgeKeys(const std::string& root, const std::vector<std::string>& keys);
 uint64_t cacheBytes(const std::string& root);
 uint64_t purgeAll(const std::string& root);  // returns bytes freed

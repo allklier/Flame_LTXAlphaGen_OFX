@@ -1,3 +1,60 @@
+# --- Build output (CMake, out-of-source or in-source) ---
 build/
+build-*/
+cmake-build-*/
+dist/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Testing/
+cmake_install.cmake
+compile_commands.json
+*.o
+*.a
+*.so
+*.ofx
+*.ofx.bundle/
+
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Model weights and caches: never commit (LTX-2.x licence forbids redistribution) ---
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.matte
+models/
+
+# --- Generated media, logs, support bundles ---
+*.mp4
+*.mov
+*.exr
+*.log
+ltx-alphagen-support-*.tar.gz
+
+# --- Test plans and results: local working notes, not part of the repo (user, 2026-10-11) ---
+docs/
+
+# --- Private Claude Code notes (machines, paths, accounts); CLAUDE.md is the public part ---
+CLAUDE.local.md
+
+# --- Secrets ---
+.env
+.env.*
+*token*.txt
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

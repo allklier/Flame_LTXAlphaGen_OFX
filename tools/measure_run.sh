@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build step 3: one measurement run of the official Alpha Gen recipe (model card) on akflame5.
-#   measure_run.sh WIDTH HEIGHT FRAMES PRECISION [extra ic_lora args...]
+# One measurement run of the official Alpha Gen recipe (model card) with the LTX-2 CLI.
+#   LTXAG_ROOT=<dir with models/ ltx2/ tmp/ logs/> measure_run.sh WIDTH HEIGHT FRAMES PRECISION [extra ic_lora args...]
 # PRECISION: bf16 | fp8 (fp8 = --quantization fp8-cast on the bf16 file).
 # Renders at native WIDTHxHEIGHT (the CLI takes 2x with --skip-stage-2). Samples the process's
 # real GPU memory (nvidia-smi per-process, includes the CUDA context) every 0.25 s.
 # Appends one CSV line to $ROOT/logs/measurements.csv; full output in $ROOT/logs/run-*.log.
 set -uo pipefail
-ROOT=/Volumes/Data2/ltx-alphagen
+ROOT=${LTXAG_ROOT:?set LTXAG_ROOT}
 M=$ROOT/models
 W=$1 H=$2 N=$3 PREC=$4
 shift 4

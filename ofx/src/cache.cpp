@@ -88,6 +88,21 @@ bool isPending(const std::string& root, const std::string& key) {
   return pidAlive(readPid(p));
 }
 
+void markPending(const std::string& root, const std::vector<std::string>& keys, int pid) {
+  mkdir((root + "/pending").c_str(), 0755);
+  const std::string text = std::to_string(pid);
+  for (const auto& k : keys) {
+    const int fd = open(pendingPath(root, k).c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) continue;
+    (void)!write(fd, text.data(), text.size());
+    close(fd);
+  }
+}
+
+void clearPending(const std::string& root, const std::vector<std::string>& keys) {
+  for (const auto& k : keys) unlink(pendingPath(root, k).c_str());
+}
+
 size_t purgeKeys(const std::string& root, const std::vector<std::string>& keys) {
   size_t n = 0;
   for (const auto& k : keys)

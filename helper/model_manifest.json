@@ -1,0 +1,79 @@
+{
+  "manifest_version": 1,
+  "note": "Pinned runtime and model files for this plugin version (decision 51). File SHA-256 values were computed 2026-10-11 from copies whose sizes match HF revision below; HF masks hashes for gated repos without auth, so confirm them at the first authenticated download (setup verifies every file and rejects mismatches). 'path' is the layout inside the Model Folder; 'hf_path' is the path inside the HF repo.",
+  "uv": {
+    "version": "0.12.18",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.12.18/uv-x86_64-unknown-linux-gnu.tar.gz",
+    "size": 19798687,
+    "sha256": "89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16"
+  },
+  "ltx2": {
+    "commit": "9ec55f9f22798a3198d9c923856824821bc3317e",
+    "url": "https://github.com/Lightricks/LTX-2/archive/9ec55f9f22798a3198d9c923856824821bc3317e.tar.gz",
+    "lockfile": "ltx2-uv.lock",
+    "lock_note": "Lightricks' repo ships no uv.lock; this one was resolved at the pinned commit on 2026-10-10 (torch 2.13.0+cu132, ltx-core 1.4.2) and is the environment all tests ran in. uv sync --frozen installs exactly it."
+  },
+  "pip_extra": [
+    "opencolorio==2.6.0"
+  ],
+  "runtime": {
+    "note": "uv cache size after a fresh uv sync of ltx2-uv.lock (measured 6627332375 bytes incl. pip_extra, Rocky 9.7, 2026-10-11); only drives the setup progress bar",
+    "uv_cache_bytes": 6600000000
+  },
+  "files": [
+    {
+      "key": "transformer",
+      "repo": "Lightricks/LTX-2.5",
+      "revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+      "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
+      "size": 42018190584,
+      "sha256": "31eb3cad89b9e54e99dd3baf286f70825ac4f6c660a70d9184d895be76d7bff4",
+      "hf_path": "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"
+    },
+    {
+      "key": "text_encoder",
+      "repo": "Lightricks/LTX-2.5",
+      "revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+      "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+      "size": 26263858182,
+      "sha256": "ef7243612fdae7a75cb4d5cee9433e81380675fb6c213bd98ae74a9cd16561d1",
+      "hf_path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
+    },
+    {
+      "key": "video_vae",
+      "repo": "Lightricks/LTX-2.5",
+      "revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+      "path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+      "size": 1472223346,
+      "sha256": "847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3",
+      "hf_path": "vae/ltx-2.5-video-vae-bf16.safetensors"
+    },
+    {
+      "key": "audio_vae",
+      "repo": "Lightricks/LTX-2.5",
+      "revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+      "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+      "size": 364866540,
+      "sha256": "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5",
+      "hf_path": "vae/ltx-2.5-audio-vae-bf16.safetensors"
+    },
+    {
+      "key": "upsampler",
+      "repo": "Lightricks/LTX-2.5",
+      "revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+      "path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+      "size": 995778752,
+      "sha256": "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8",
+      "hf_path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+    },
+    {
+      "key": "lora",
+      "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen",
+      "revision": "6184df14b1b560bf9b6447d3ee126bd7e4a88513",
+      "path": "loras/ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors",
+      "size": 1308787472,
+      "sha256": "d9e143f979e0756f0c83d772e6a8890f4c6b933db1f7d93fc06e25c179f3fd36",
+      "hf_path": "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"
+    }
+  ]
+}

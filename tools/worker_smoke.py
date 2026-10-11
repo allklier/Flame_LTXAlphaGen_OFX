@@ -56,7 +56,7 @@ def main() -> int:
         frames.astype("<f2").tofile(f)
     cmd = [worker_py, "-I", "-B", os.path.join(HERE, "..", "worker", "ltx_worker.py"), "--in", inp,
            "--chunks", chunks, "--out-prefix", prefix, "--model-dir", model_dir,
-           "--embeddings", emb, "--precision", precision]
+           "--embeddings", emb, "--precision", precision, *os.environ.get("WORKER_EXTRA", "").split()]
     print("running:", " ".join(cmd), flush=True)
     t0 = time.time()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

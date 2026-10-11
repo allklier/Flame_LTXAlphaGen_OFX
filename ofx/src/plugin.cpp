@@ -44,7 +44,12 @@
 #include "process.h"
 #include "transport.h"
 #include "user_config.h"
+#include "vram_estimate.h"
 
+#ifndef LTXAG_VERSION_MAJOR  // from CMakeLists.txt LTXAG_VERSION
+#define LTXAG_VERSION_MAJOR 0
+#define LTXAG_VERSION_MINOR 0
+#endif
 #ifndef LTXAG_DEV_BUILD
 #define LTXAG_DEV_BUILD 0
 #endif
@@ -59,10 +64,10 @@ constexpr const char* kPluginLabel = "LTX Alpha Gen";
 constexpr const char* kModelVersion = "ltx2.5-alphagen0.9-recipe1";
 constexpr const char* kDummyVersion = "dummy-0.3";
 
-// Placeholder until build step 3 measures real peak VRAM (decision 34).
-constexpr double kPlaceholderBf16NeedGB = 58.8;  // measured: HD 1920x1088, 145 frames, bf16 (build step 3)
+// Decision 34(a): bf16 is the built-in default only if a full HD chunk fits (vram_estimate.h).
+constexpr int kDefaultCheckW = 1920, kDefaultCheckH = 1080, kDefaultCheckFrames = 145;
 
-const char* const kColourSpaces[] = {"Bypass", "ACEScg", "LogC4", "Log3G10"};
+const char* const kColourSpaces[] = {"Bypass", "ACEScg", "LogC4", "Log3G10", "LogC3", "BMD Film Gen5"};
 const char* const kPrecisions[] = {"bf16", "fp8"};
 const char* const kSimulations[] = {"none", "oom", "crash", "hang"};
 
@@ -85,6 +90,7 @@ constexpr const char* kPToken = "hfToken";
 constexpr const char* kPDownload = "download";
 // [Models] — per user.
 constexpr const char* kPModelDir = "modelDir";
+constexpr const char* kPExistingDir = "existingModels";
 constexpr const char* kPSetupStatus = "setupStatus";
 constexpr const char* kPDebugLog = "debugLogging";
 constexpr const char* kPCollectLogs = "collectLogs";
@@ -129,6 +135,12 @@ std::string timeStr(const char* fmt) {
   char b[32];
   std::strftime(b, sizeof b, fmt, &tm);
   return b;
+}
+
+// "/a/b/" -> "/a/b" (but "/" stays "/").
+std::string trimSlashes(std::string p) {
+  while (p.size() > 1 && p.back() == '/') p.pop_back();
+  return p;
 }
 
 std::string fmtGB(double v) {
@@ -188,7 +200,10 @@ SetupState setupState() {
   SetupState s;
   s.licenceAccepted = cfg.count("licence_accepted") && cfg.count("licence_hash") &&
                       cfg.at("licence_hash") == licenceHash();
-  s.modelsReady = cfg.count("models_ready") > 0;
+  // Ready = the setup helper finished (models verified, prompt cache built) AND the runtime exists.
+  struct stat st {};
+  s.modelsReady = cfg.count("models_ready") > 0 && cfg.count("ltx_python") > 0 &&
+                  stat(cfg.at("ltx_python").c_str(), &st) == 0;
   return s;
 }
 
@@ -204,7 +219,9 @@ Defaults computeDefaults() {
   Defaults d;
   const VramInfo v = queryVram();
   d.headroomGB = v.ok ? std::round(v.freeGB * 0.05 * 10.0) / 10.0 : 2.0;
-  d.precision = (v.ok && v.freeGB - d.headroomGB < kPlaceholderBf16NeedGB) ? 1 : 0;
+  const double bf16Need =
+      estimateVramNeed(false, kDefaultCheckW, kDefaultCheckH, kDefaultCheckFrames, false).gb;
+  d.precision = (v.ok && v.freeGB - d.headroomGB < bf16Need) ? 1 : 0;
   std::string src = v.ok ? "built-in (free " + fmtGB(v.freeGB) + " of " + fmtGB(v.totalGB) + " GB)"
                          : "built-in (NVML unavailable)";
   const UserConfig cfg = loadUserConfig();
@@ -273,6 +290,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     tokenCaption_ = fetchStringParam(kPTokenCaption);
     token_ = fetchStringParam(kPToken);
     modelDir_ = fetchStringParam(kPModelDir);
+    existingDir_ = fetchStringParam(kPExistingDir);
     setupStatus_ = fetchStringParam(kPSetupStatus);
     debugLog_ = fetchBooleanParam(kPDebugLog);
     cacheDir_ = fetchStringParam(kPCacheDir);
@@ -313,6 +331,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       const UserConfig cfg = loadUserConfig();
       accept_->setValue(setupState().licenceAccepted);
       if (cfg.count("model_dir")) modelDir_->setValue(cfg.at("model_dir"));
+      if (cfg.count("existing_models")) existingDir_->setValue(cfg.at("existing_models"));
       cacheDir_->setValue(cacheSettings(cfg).root);
       debugLog_->setValue(logLevel() == LogLevel::Debug);
       refreshSetupUi();
@@ -415,14 +434,17 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
 
     const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;  // source frame size (the matte's size)
+    const bool realMatte = !matte.empty();  // before drawMarker() fills it with the marker
     if (matte.empty()) {
       bool marker = true;
       showMarker_->getValue(marker);
       if (marker) drawMarker(matte, w, h, caption);
     }
     // Flame always gives an RGBA output and shows it as an image output plus a matte output
-    // (decision 43 attempt failed). Decision 48: the image mirrors the source, and the alpha
-    // (Flame's matte output) carries the matte or marker. A 1-channel output gets the matte.
+    // (decision 43 attempt failed). Decision 48: the alpha (Flame's matte output) carries the
+    // matte or marker. Decision 58: the image is the source with the matte overlaid in magenta
+    // at 30% (overlayPixel, marker.h); frames without a matte show the plain
+    // source. A 1-channel output gets the matte.
     const bool rgbFromSource = src && src->getPixelDepth() == OFX::eBitDepthFloat;
     const OfxRectI& win = args.renderWindow;
     const int comps = dst_->getPixelComponents() == OFX::ePixelComponentRGBA  ? 4
@@ -447,7 +469,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
         const float* sp = (rgbFromSource && inside)
                               ? static_cast<const float*>(src->getPixelAddress(x, y))
                               : nullptr;
-        for (int k = 0; k < 3; ++k) *px++ = sp ? sp[k] : 0.0f;
+        static const float kBlack[3] = {0.0f, 0.0f, 0.0f};
+        overlayPixel(sp ? sp : kBlack, realMatte ? v : 0.0f, px);
+        px += 3;
         if (comps == 4) *px++ = v;
       }
     }
@@ -491,11 +515,12 @@ class AlphaGenEffect : public OFX::ImageEffect {
       }
       saveUserConfig(cfg);
       LOGI("licence %s (hash %s)", v ? "accepted" : "withdrawn", licenceHash().c_str());
-    } else if (name == kPModelDir || name == kPCacheDir) {
+    } else if (name == kPModelDir || name == kPCacheDir || name == kPExistingDir) {
       std::string v;
-      (name == kPModelDir ? modelDir_ : cacheDir_)->getValue(v);
+      (name == kPModelDir ? modelDir_ : name == kPCacheDir ? cacheDir_ : existingDir_)->getValue(v);
+      v = trimSlashes(v);
       UserConfig cfg = loadUserConfig();
-      cfg[name == kPModelDir ? "model_dir" : "cache_dir"] = v;
+      cfg[name == kPModelDir ? "model_dir" : name == kPCacheDir ? "cache_dir" : "existing_models"] = v;
       saveUserConfig(cfg);
       LOGI("%s set to %s", name.c_str(), v.c_str());
       refreshCacheInfo();
@@ -597,12 +622,101 @@ class AlphaGenEffect : public OFX::ImageEffect {
     sendMessage(OFX::Message::eMessageError, "", msg);
   }
 
+  std::string workerSocket() { return homeDir() + "/.cache/ltx-alphagen/run/worker.sock"; }
+
+  // Decisions 12/34(c)/56: never silently downgrade. Size-aware estimate from the measurements
+  // (vram_estimate.h). A live resident worker's memory counts as available whatever its
+  // precision: a matching one is reused, another one is restarted (which frees it). Flame test 1
+  // (2026-10-11) showed two false refusals when this only counted a matching precision.
+  // Decision 56 (user, 2026-10-11): too little memory is a warning with Yes/No, not a refusal,
+  // because the estimate rests on few measurements. The numbers go into the manifest so job.py
+  // can log estimate vs actual (logs/vram_stats.csv).
+  bool preflight(double time, const std::vector<Chunk>& chunks, std::string& vramJson) {
+    int prec = 0;
+    double head = 0.0, simNeed = 0.0;
+    bool unload = true;
+    precision_->getValue(prec);
+    headroom_->getValue(head);
+    unload_->getValue(unload);
+    simNeed_->getValue(simNeed);
+    const OfxRectD rod = src_->getRegionOfDefinition(time);
+    const int w = int(std::lround(rod.x2 - rod.x1)), h = int(std::lround(rod.y2 - rod.y1));
+    int longest = 0;
+    for (const auto& c : chunks) longest = std::max(longest, c.len);
+    const VramNeed est = estimateVramNeed(prec == 1, w, h, longest, !unload);
+    const double need = simNeed > 0.0 ? simNeed : est.gb;
+    const VramInfo v = queryVram();
+    double reusable = 0.0;
+    unsigned workerPid = 0;
+    const std::string info = readFile(workerSocket() + ".json");
+    if (!info.empty() && pidAlive(std::atoi(jsonField(info, "pid").c_str()))) {
+      workerPid = unsigned(std::atoi(jsonField(info, "pid").c_str()));
+      reusable = std::atof(jsonField(info, "vram_gb").c_str());
+    }
+    const double available = v.freeGB + reusable - head;
+    LOGI("preflight: %s %dx%d longest chunk %d -> model %dx%dx%d, need %.1f GB%s; free %.1f + resident "
+         "%.1f - reserve %.1f = %.1f GB available (nvml %s)",
+         kPrecisions[prec], w, h, longest, est.modelW, est.modelH, est.modelFrames, need,
+         simNeed > 0.0 ? " (simulated)" : "", v.freeGB, reusable, head, available, v.ok ? "ok" : "unavailable");
+    bool warned = false;
+    if (v.ok && need > available) {
+      // Who holds the rest: Flame (this process), our resident worker, everyone else.
+      double flame = 0.0, others = 0.0;
+      std::string list;
+      int listed = 0;
+      for (const auto& p : queryGpuProcesses()) {
+        const double gb = std::max(0.0, p.usedGB);
+        if (p.pid == unsigned(getpid())) {
+          flame += gb;
+        } else if (p.pid != workerPid) {
+          others += gb;
+          if (gb >= 0.1 && listed < 4) {
+            list += std::string(listed++ ? ", " : "") + p.name + " " + fmtGB(gb);
+          }
+        }
+      }
+      LOGW("preflight: GPU %.1f GB total, %.1f free; Flame holds %.1f GB, LTX worker %.1f GB, other apps %.1f GB (%s)",
+           v.totalGB, v.freeGB, flame, reusable, others, list.c_str());
+      std::string msg = "This clip may not fit in GPU memory.\n\nEstimated need: about " + fmtGB(need) +
+                        " GB (" + kPrecisions[prec] + ", " + std::to_string(est.modelW) + "x" +
+                        std::to_string(est.modelH) + ", " + std::to_string(est.modelFrames) +
+                        " frames per chunk).\nAvailable: " + fmtGB(available) + " GB = " + fmtGB(v.freeGB) +
+                        " GB free";
+      if (reusable > 0.0) msg += " + " + fmtGB(reusable) + " GB held by the LTX worker";
+      msg += " - " + fmtGB(head) + " GB reserved for Flame.\nIn use on the " + fmtGB(v.totalGB) +
+             " GB GPU: Flame " + fmtGB(flame) + " GB, other apps " + fmtGB(others) + " GB" +
+             (list.empty() ? "" : " (" + list + ")") + ".\n\nThe estimate is conservative, so it may " +
+             "still work; if not, the job stops with an out-of-memory error and Flame is not affected." +
+             (prec == 0 ? " fp8 needs about 17 GB less." : "") + "\n\nProcess anyway?";
+      const OFX::Message::MessageReplyEnum reply = sendMessage(OFX::Message::eMessageQuestion, "", msg);
+      LOGI("preflight: warning shown, reply %d (0 OK, 1 Yes, 2 No, 3 Failed)", int(reply));
+      if (reply == OFX::Message::eMessageReplyNo) return false;
+      if (reply != OFX::Message::eMessageReplyYes) {
+        // The host did not ask (decision 56 fallback B): go ahead, but say so in the footer.
+        setPersistentMessage(OFX::Message::eMessageWarning, "",
+                             "Processing although the clip may not fit in GPU memory (need ~" + fmtGB(need) +
+                                 " GB, available " + fmtGB(available) + " GB).");
+      }
+      warned = true;
+    }
+    char buf[512];
+    std::snprintf(buf, sizeof buf,
+                  "{\"estimate_gb\":%.2f,\"free_gb\":%.2f,\"total_gb\":%.2f,\"resident_gb\":%.2f,"
+                  "\"reserve_gb\":%.2f,\"model_w\":%d,\"model_h\":%d,\"model_frames\":%d,\"nvml\":%s,"
+                  "\"warned\":%s,",
+                  need, v.freeGB, v.totalGB, reusable, head, est.modelW, est.modelH, est.modelFrames,
+                  v.ok ? "true" : "false", warned ? "true" : "false");
+    vramJson = std::string(buf) + "\"gpu\":" + jsonStr(v.name) + ",\"driver\":" + jsonStr(v.driver) + "}";
+    return true;
+  }
+
   // Fetches every frame of the clip during this action and hands them to a detached job.
   void process(double time) {
     if (gateClosed()) return error("Complete the Licence and Models setup first.");
     const UserConfig cfg = loadUserConfig();
     std::string modelDir;
     modelDir_->getValue(modelDir);
+    modelDir = trimSlashes(modelDir);  // ".../models/" must not look like another folder (restarts the worker)
     const std::string ltxPython = cfg.count("ltx_python") ? cfg.at("ltx_python") : "";
     if (!useDummy()) {
       struct stat st {};
@@ -611,22 +725,12 @@ class AlphaGenEffect : public OFX::ImageEffect {
       if (stat((modelDir + "/diffusion_models").c_str(), &st) != 0)
         return error("No models found in the Model Folder: " + modelDir);
     }
-    double need = 0.0, head = 0.0;
-    simNeed_->getValue(need);
-    headroom_->getValue(head);
-    if (need > 0.0) {
-      const VramInfo v = queryVram();
-      LOGI("preflight: need %.1f GB, free %.1f GB, reserve %.1f GB", need, v.freeGB, head);
-      if (v.ok && need > v.freeGB - head)
-        return error("Not enough GPU memory: this run needs about " + fmtGB(need) + " GB, " +
-                     fmtGB(v.freeGB) + " GB is free and " + fmtGB(head) +
-                     " GB is reserved for Flame. Try fp8 precision or a lower reserve.");
-    }
-
     const OfxRangeD r = src_->getFrameRange();
     const int first = int(std::lround(r.min));
     const int n = int(std::lround(r.max)) - first + 1;
     const auto chunks = planChunks(n);
+    std::string vramJson;
+    if (!preflight(time, chunks, vramJson)) return;
     const std::string sig = paramSignature();
     const std::string root = cacheRoot();
     const std::string jobId = std::to_string(getpid()) + "-" + std::to_string(gJobSeq++) + "-" +
@@ -717,13 +821,21 @@ class AlphaGenEffect : public OFX::ImageEffect {
     js << "],\"cache_root\":" << jsonStr(root)
        << ",\"worker\":"
        << jsonStr(resourcesDir() + (useDummy() ? "/worker/dummy_worker.py" : "/worker/ltx_worker.py"));
-    if (!useDummy())
+    if (!useDummy()) {
+      bool unload = true;
+      unload_->getValue(unload);
+      int colour = 0;
+      colour_->getValue(colour);
       js << ",\"worker_python\":" << jsonStr(ltxPython) << ",\"worker_args\":[\"--model-dir\","
          << jsonStr(modelDir) << ",\"--embeddings\"," << jsonStr(root + "/prompt-empty.safetensors")
-         << "]";
+         << "],\"worker_socket\":" << jsonStr(workerSocket()) << ",\"model_dir\":" << jsonStr(modelDir)
+         << ",\"unload\":" << (unload ? "true" : "false")
+         << ",\"colour\":" << jsonStr(kColourSpaces[colour]) << ",\"ocio_config\":\"\",\"seed\":1234";
+    }
     js
        << ",\"seconds\":" << seconds << ",\"simulate\":" << jsonStr(kSimulations[sim])
-       << ",\"precision\":" << jsonStr(kPrecisions[prec])
+       << ",\"precision\":" << jsonStr(kPrecisions[prec]) << ",\"vram\":" << vramJson
+       << ",\"flame_pid\":" << getpid()
        << ",\"title\":" << jsonStr("LTX Alpha Gen - " + std::to_string(n) + " frames") << "}";
     const std::string manifest = "/dev/shm/ltxag_job_" + jobId + ".json";
     {
@@ -731,10 +843,14 @@ class AlphaGenEffect : public OFX::ImageEffect {
       mf << js.str();
     }
     const std::string level = logLevel() == LogLevel::Debug ? "debug" : "info";
+    // Before the launch: the render Flame triggers right after this button press must already
+    // see PROCESSING (test 2: it raced job.py's own markers and showed NOT PROCESSED).
+    markPending(root, keys, getpid());
     const bool ok = launchDetached(
         {pythonPath(), "-I", "-B", resourcesDir() + "/worker/job.py", manifest},
         cleanEnvironment({"LTXAG_LOG_LEVEL=" + level}), err);
     if (!ok) {
+      clearPending(root, keys);
       unlink(input.c_str());
       unlink(manifest.c_str());
       return error("Could not start processing: " + err);
@@ -746,11 +862,11 @@ class AlphaGenEffect : public OFX::ImageEffect {
     setIfChanged(status_, "Processing " + std::to_string(n) + " frames");
     LOGI("process: job launched (job python %s, worker %s)", pythonPath().c_str(),
          useDummy() ? "dummy" : ltxPython.c_str());
-    startWatcher(jobId, root);
+    startWatcher(jobId, root, keys);
   }
 
   // --- Decision 42 (a): follow the job and nudge Flame to re-render. EXPERIMENT. ---
-  void startWatcher(const std::string& jobId, const std::string& root) {
+  void startWatcher(const std::string& jobId, const std::string& root, const std::vector<std::string>& keys) {
     stopWatcher();
     bool enabled = true;
     autoRefresh_->getValue(enabled);
@@ -760,7 +876,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
     stopFlag_ = false;
     const std::string node = nodeId_;
-    watcher_ = std::thread([this, jobId, root, node] { watch(jobId, root, node); });
+    watcher_ = std::thread([this, jobId, root, node, keys] { watch(jobId, root, node, keys); });
   }
 
   void stopWatcher() {
@@ -768,7 +884,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
     if (watcher_.joinable()) watcher_.join();
   }
 
-  void watch(const std::string& jobId, const std::string& root, const std::string& node) {
+  void watch(const std::string& jobId, const std::string& root, const std::string& node,
+             const std::vector<std::string>& keys) {
     LogScope scope(node, jobId);
     LOGI("watcher started (this thread is not an OFX action thread)");
     std::string lastSeen;
@@ -779,7 +896,10 @@ class AlphaGenEffect : public OFX::ImageEffect {
       const std::string j = readFile(root + "/jobs/" + jobId + ".json");
       if (j.empty()) {
         if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(60)) {
-          LOGW("watcher: job wrote no status within 60 s; giving up");
+          // job.py never ran, so the markers written before the launch (with Flame's pid) would
+          // otherwise show PROCESSING for as long as Flame runs.
+          clearPending(root, keys);
+          LOGW("watcher: job wrote no status within 60 s; cleared its pending markers, giving up");
           return;
         }
         continue;
@@ -847,23 +967,32 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
   void download() {
-    std::string token, dir;
+    std::string token, dir, existing;
     token_->getValue(token);
     modelDir_->getValue(dir);
-    LOGI("download pressed: licence=%d token length=%zu dir=%s",
-         int(setupState().licenceAccepted), token.size(), dir.c_str());
+    existingDir_->getValue(existing);
+    dir = trimSlashes(dir);
+    existing = trimSlashes(existing);
+    LOGI("download pressed: licence=%d token length=%zu model dir=%s existing=%s",
+         int(setupState().licenceAccepted), token.size(), dir.c_str(), existing.c_str());
     if (!setupState().licenceAccepted)
       return error("Accept the LTX-2 Community License before downloading.");
-    if (token.empty()) return error("Enter your Hugging Face token first.");
+    // The token is optional: everything may already be in the Model Folder or the Existing
+    // Models folder (decision 51). The helper says which files still need it.
     std::string err;
-    const std::string helper = resourcesDir() + "/helper/model_page_helper.py";
-    const bool ok = launchDetached({pythonPath(), "-I", "-B", helper, dir},
-                                   cleanEnvironment({"HF_TOKEN=" + token}), err);
+    const std::string helper = resourcesDir() + "/helper/setup_helper.py";
+    std::vector<std::string> argv = {pythonPath(), "-I", "-B", helper, "--model-dir", dir,
+                                     "--cache-root", cacheRoot()};
+    if (!existing.empty()) argv.insert(argv.end(), {"--existing", existing});
+    const std::string level = logLevel() == LogLevel::Debug ? "debug" : "info";
+    Env extras = {"LTXAG_LOG_LEVEL=" + level};
+    if (!token.empty()) extras.push_back("HF_TOKEN=" + token);
+    const bool ok = launchDetached(argv, cleanEnvironment(extras), err);
     token.assign(token.size(), '\0');
     token_->setValue("");  // decision 13: used once, then discarded
     // Decision 41: say what happened to the token instead of leaving a blank field.
-    setIfChanged(tokenCaption_, ok ? "Token used " + timeStr("%H:%M") + ", not stored"
-                                   : std::string(kTokenCaptionDefault));
+    setIfChanged(tokenCaption_, ok && !token.empty() ? "Token used " + timeStr("%H:%M") + ", not stored"
+                                                     : std::string(kTokenCaptionDefault));
     if (!ok) error("Download failed to start: " + err);
     LOGI("download: helper %s %s; token cleared", ok ? "launched" : "FAILED", err.c_str());
   }
@@ -914,6 +1043,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   OFX::StringParam* tokenCaption_;
   OFX::StringParam* token_;
   OFX::StringParam* modelDir_;
+  OFX::StringParam* existingDir_;
   OFX::StringParam* setupStatus_;
   OFX::BooleanParam* debugLog_;
   OFX::StringParam* cacheDir_;
@@ -946,7 +1076,8 @@ D* labelled(D* p, const char* label, const char* hint) {
 
 class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
  public:
-  AlphaGenFactory() : PluginFactoryHelper<AlphaGenFactory>(kPluginId, 0, 3) {}
+  AlphaGenFactory()
+      : PluginFactoryHelper<AlphaGenFactory>(kPluginId, LTXAG_VERSION_MAJOR, LTXAG_VERSION_MINOR) {}
 
   void describe(OFX::ImageEffectDescriptor& desc) override {
     logConfigure();
@@ -1036,7 +1167,7 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     auto* colour = labelled(desc.defineChoiceParam(kPColour), "Input Colour",
                             "Colour space of the source. It is converted to Rec.1886 through the "
                             "ACES 2.0 SDR 100 nits (Rec.709) view before inference. Bypass: the "
-                            "source is already display-referred. (Prototype: not applied yet.)");
+                            "source is already display-referred. LogC3 is ARRI LogC3 EI800.");
     for (const char* c : kColourSpaces) colour->appendOption(c);
     colour->setDefault(0);
     place(*colour, gMain);
@@ -1115,26 +1246,37 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     perUser(token);
     place(*token, gLic);
     place(*button(kPDownload, "Download",
-                  "Download the models into the Model Folder (prototype: simulated)."),
+                  "Install the LTX runtime and the models into the Model Folder: reuses verified "
+                  "files from Existing Models, downloads the rest with your token."),
           gLic);
 
     // --- Models (5 rows, per user) ---
     auto* gModels = group("grpModels", "Models", setupPage);
     auto* dir = labelled(desc.defineStringParam(kPModelDir), "Model Folder",
-                         "Where the model files are stored (about 71 GB).");
+                         "Where the models and the LTX runtime are installed (about 80 GB).");
     dir->setStringType(OFX::eStringTypeDirectoryPath);
     dir->setDefault(homeDir() + "/ltx-alphagen-models");
     perUser(dir);
     place(*dir, gModels);
+    auto* ex = labelled(desc.defineStringParam(kPExistingDir), "Existing Models",
+                        "Optional: a folder that may already contain the model files (e.g. a ComfyUI "
+                        "models folder). Matching files are verified and copied instead of downloaded.");
+    ex->setStringType(OFX::eStringTypeDirectoryPath);
+    ex->setDefault("");
+    perUser(ex);
+    place(*ex, gModels);
     place(*label(kPSetupStatus, "Setup", ""), gModels);
+
+    // --- Support (2 rows, per user) ---
+    auto* gSupport = group("grpSupport", "Support", setupPage);
     auto* dbg = labelled(desc.defineBooleanParam(kPDebugLog), "Debug Logging",
                          "Verbose logging for troubleshooting (per user).");
     dbg->setDefault(false);
     perUser(dbg);
-    place(*dbg, gModels);
+    place(*dbg, gSupport);
     place(*button(kPCollectLogs, "Collect Logs",
                   "Write a support bundle (logs and system details) to your home folder."),
-          gModels);
+          gSupport);
 
     // --- Prototype (dev builds; hidden otherwise) ---
     OFX::GroupParamDescriptor* gProto = proto ? group("grpProto", "Prototype", proto) : nullptr;

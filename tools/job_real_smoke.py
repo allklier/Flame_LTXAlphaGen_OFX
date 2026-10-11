@@ -1,6 +1,6 @@
 """job.py + real worker end to end, as the plugin's Process button runs it (no Flame).
 
-  python3 job_real_smoke.py LTX_PYTHON MODEL_DIR [W H N PRECISION]
+  python3 job_real_smoke.py LTX_PYTHON MODEL_DIR EMBEDDINGS [W H N PRECISION]
 
 Plans chunks and crossfade weights exactly like ofx/src/chunk_plan.cpp (145 frames, 24
 overlap), stages frames, writes the manifest, runs job.py --no-ui with this interpreter as the
@@ -54,9 +54,9 @@ def contributions(chunks, i):  # mirrors frameContributions()
 
 
 def main() -> int:
-    ltx_python, model_dir = sys.argv[1:3]
-    w, h, n = (int(v) for v in (sys.argv[3:6] if len(sys.argv) > 5 else (960, 540, 200)))
-    precision = sys.argv[6] if len(sys.argv) > 6 else "fp8"
+    ltx_python, model_dir, embeddings = sys.argv[1:4]
+    w, h, n = (int(v) for v in (sys.argv[4:7] if len(sys.argv) > 6 else (960, 540, 200)))
+    precision = sys.argv[7] if len(sys.argv) > 7 else "fp8"
     frames, truth = make_frames(w, h, n)
     job_id = f"smoke-{os.getpid()}"
     root = f"/dev/shm/ltxag_smoke_cache_{os.getpid()}"
@@ -72,7 +72,7 @@ def main() -> int:
         "contrib": [contributions(chunks, i) for i in range(n)], "cache_root": root,
         "worker": os.path.join(HERE, "..", "worker", "ltx_worker.py"), "worker_python": ltx_python,
         "worker_args": ["--model-dir", model_dir, "--embeddings",
-                        "/Volumes/Data2/ltx-alphagen/cache/prompt-empty.safetensors"],
+                        embeddings],
         "seconds": 0, "simulate": "none", "precision": precision, "title": "smoke",
     }
     mpath = f"/dev/shm/ltxag_job_{job_id}.json"

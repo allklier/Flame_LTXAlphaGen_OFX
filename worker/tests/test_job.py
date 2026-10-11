@@ -1,11 +1,13 @@
 """Runs job.py end to end (no UI) on a staged input, as the OFX Process button would."""
 
+import csv
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -65,6 +67,8 @@ class JobTest(unittest.TestCase):
             rc, keys, status = self.run_job(root, frames, chunks, contrib)
             self.assertEqual((rc, status["state"]), (0, "done"), status)
             self.assertEqual((status["chunks_done"], status["chunks"], status["frames_done"]), (2, 2, 12))
+            # Not started by Flame: no refresh marker (the hook would step a live Flame's frame).
+            self.assertFalse(os.path.exists(os.path.join(root, ".cache/ltx-alphagen/run/refresh")))
             want = luma(frames)
             for i, k in enumerate(keys):
                 with open(cache.matte_path(root, k), "rb") as f:
@@ -88,6 +92,82 @@ class JobTest(unittest.TestCase):
             rc, _, status = self.run_job(root, frames, [[0, 3]], [[[0, 1.0]]] * 3, "crash")
             self.assertEqual((rc, status["state"]), (1, "failed"))
             self.assertIn("signal 11", status["message"])
+
+
+class TrackerTest(unittest.TestCase):
+    """Progress line and time-left estimate from stage/step events (fake clock)."""
+
+    def setUp(self):
+        import job
+
+        self.job = job
+        self.now = 1000.0
+        patcher = mock.patch.object(job.time, "time", lambda: self.now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_line_and_estimate(self):
+        t = self.job.Tracker([[0, 145], [120, 145]], 265)
+        self.assertEqual(t.render(), (0.0, "Starting the worker · 0:00 elapsed"))
+        self.now += 5
+        t.on_stage(0, "converting")
+        self.now += 4
+        t.on_stage(0, "denoising")
+        frac, text = t.render()
+        self.assertIn("Chunk 1/2 · frames 1–145 of 265 · starting · 0:09 elapsed · estimating time left", text)
+        self.now += 16  # step 1 includes the transformer build: not used for the rate
+        t.on_step(0, 1, 8)
+        self.assertIn("estimating time left", t.render()[1])
+        self.now += 10
+        t.on_step(0, 2, 8)
+        frac, text = t.render()
+        self.assertIn("step 2/8", text)
+        # left: 6 steps x 10 s + decode 1.4 x 10 s, then chunk 2: 4 s + 80 s + 14 s = 74 + 98 = 172 s
+        self.assertIn("about 2:52 left", text)
+        self.assertAlmostEqual(frac, (0.05 + 0.85 * 2 / 8) * 145 / 290)
+        for k in range(3, 9):
+            self.now += 10
+            t.on_step(0, k, 8)
+        t.on_stage(0, "decoding")
+        self.now += 20  # the real decode took 20 s: chunk 2 uses that
+        t.on_chunk_done(0)
+        t.on_stage(1, "preparing")
+        frac, text = t.render()
+        self.assertIn("Chunk 2/2 · frames 121–265 of 265 · preparing", text)
+        self.assertIn("about 1:44 left", text)  # 4 + 80 + 20
+        self.assertAlmostEqual(frac, 0.5)
+
+
+class RefreshMarkerTest(unittest.TestCase):
+    def test_marker_only_for_flame(self):
+        import job
+
+        self.assertFalse(job.started_by_flame(os.getpid()))  # this test runs in python, not flame
+        self.assertFalse(job.started_by_flame(0))
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(job, "REFRESH_DIR", os.path.join(home, "r")):
+            job.signal_refresh("j1", "n1", "done")
+            with open(os.path.join(home, "r", "j1.json")) as f:
+                self.assertEqual(json.load(f)["node_id"], "n1")
+
+
+class VramRecordTest(unittest.TestCase):
+    def test_csv_row(self):
+        import job
+
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"HOME": home}):
+            m = {"job_id": "j1", "precision": "fp8", "width": 1920, "height": 1080, "chunks": [[0, 145]],
+                 "unload": False, "vram": {"estimate_gb": 43.8, "free_gb": 89.7, "resident_gb": 0.0,
+                                           "reserve_gb": 2.7, "model_w": 1920, "model_h": 1088,
+                                           "model_frames": 145, "warned": True, "total_gb": 95.59,
+                                           "gpu": "NVIDIA RTX PRO 6000", "driver": "580.159.04"}}
+            job.record_vram(m, "vram 49.80 39.50 40.10 0.00 2.13.0+cu132", "done")
+            with open(os.path.join(home, ".cache/ltx-alphagen/logs/vram_stats.csv")) as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["used_gb"], rows[0]["estimate_gb"], rows[0]["warned"], rows[0]["resident"]),
+                         ("39.9", "43.8", "1", "1"))
+        self.assertEqual((rows[0]["gpu"], rows[0]["total_gb"], rows[0]["driver"], rows[0]["torch"]),
+                         ("NVIDIA RTX PRO 6000", "95.59", "580.159.04", "2.13.0+cu132"))
 
 
 if __name__ == "__main__":

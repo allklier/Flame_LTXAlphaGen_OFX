@@ -7,7 +7,9 @@ so the real model loads once per job):
   stdin: kept open by the job; EOF means the job is gone -> exit.
   stdout, one line per message:
     info <text>
-    progress <0..1> <text>        overall progress of the job
+    progress <0..1> <text>        free-form progress (before the first chunk)
+    stage <chunk> <name>          converting | preparing | denoising | decoding
+    step <chunk> <k> <n>          denoising step k of n finished
     chunk_done <i>                <out-prefix>_<i>.bin holds chunk i's mattes
     done
     error <kind> <text>           kind: oom | input | internal
@@ -60,14 +62,7 @@ def main() -> int:
                                for k in ("PYTHONHOME", "PYTHONPATH", "LD_LIBRARY_PATH")))
     say("info", f"precision={args.precision} simulate={args.simulate} chunks={len(chunks)}")
 
-    total_steps = len(chunks) * (DENOISE_STEPS + 1)  # encode + denoise steps per chunk
     step_s = args.seconds / (DENOISE_STEPS + 2)
-    done_steps = 0
-
-    def tick(text: str) -> None:
-        nonlocal done_steps
-        done_steps += 1
-        say("progress", round(done_steps / total_steps, 4), text)
 
     say("progress", 0.0, "loading model (simulated)")
     time.sleep(step_s)
@@ -91,10 +86,11 @@ def main() -> int:
         padded, (top, left) = padding.pad_spatial(frames)
         padded = padding.pad_temporal(padded)
         say("info", f"{label}: in {n}x{w}x{h} -> model {padded.shape[0]}x{padded.shape[2]}x{padded.shape[1]}")
-        tick(f"{label}: encoding")
+        say("stage", i, "denoising")
         for s in range(DENOISE_STEPS):
             time.sleep(step_s)
-            tick(f"{label}: denoise {s + 1}/{DENOISE_STEPS}")
+            say("step", i, s + 1, DENOISE_STEPS)
+        say("stage", i, "decoding")
         rgb = padded.astype(np.float32)
         luma = np.clip(rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722, 0.0, 1.0)
         transport.write_mattes(f"{args.out_prefix}_{i}.bin", padding.crop(luma, n, top, left, h, w))

@@ -2,6 +2,10 @@
 
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <fstream>
+#include <map>
+
 namespace ltxag {
 
 namespace {
@@ -16,6 +20,14 @@ using MemFn = int (*)(void*, NvmlMemory*);
 using ShutdownFn = int (*)();
 using NameFn = int (*)(void*, char*, unsigned int);
 using DriverFn = int (*)(char*, unsigned int);
+struct NvmlProcessInfo {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+  unsigned int gpuInstanceId;
+  unsigned int computeInstanceId;
+};
+using ProcFn = int (*)(void*, unsigned int*, NvmlProcessInfo*);
+constexpr unsigned long long kNotAvailable = ~0ULL;  // NVML_VALUE_NOT_AVAILABLE_ulonglong
 constexpr double kGB = 1024.0 * 1024.0 * 1024.0;
 }  // namespace
 
@@ -45,6 +57,47 @@ VramInfo queryVram() {
   }
   dlclose(lib);
   return info;
+}
+
+std::vector<GpuProcess> queryGpuProcesses() {
+  std::vector<GpuProcess> out;
+  void* lib = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+  if (!lib) return out;
+  auto init = reinterpret_cast<InitFn>(dlsym(lib, "nvmlInitWithFlags"));
+  auto handle = reinterpret_cast<HandleFn>(dlsym(lib, "nvmlDeviceGetHandleByIndex_v2"));
+  auto shutdown = reinterpret_cast<ShutdownFn>(dlsym(lib, "nvmlShutdown"));
+  ProcFn lists[] = {reinterpret_cast<ProcFn>(dlsym(lib, "nvmlDeviceGetComputeRunningProcesses_v3")),
+                    reinterpret_cast<ProcFn>(dlsym(lib, "nvmlDeviceGetGraphicsRunningProcesses_v3"))};
+  if (init && handle && shutdown && init(0) == 0) {
+    void* dev = nullptr;
+    std::map<unsigned, double> used;
+    if (handle(0, &dev) == 0) {
+      for (ProcFn list : lists) {
+        if (!list) continue;
+        NvmlProcessInfo infos[128];
+        unsigned int count = 128;
+        if (list(dev, &count, infos) != 0) continue;
+        for (unsigned i = 0; i < count && i < 128; ++i) {
+          const double gb = infos[i].usedGpuMemory == kNotAvailable ? -1.0 : double(infos[i].usedGpuMemory) / kGB;
+          auto it = used.find(infos[i].pid);
+          if (it == used.end() || gb > it->second) used[infos[i].pid] = gb;
+        }
+      }
+    }
+    shutdown();
+    for (const auto& u : used) {
+      GpuProcess p;
+      p.pid = u.first;
+      p.usedGB = u.second;
+      std::ifstream comm("/proc/" + std::to_string(u.first) + "/comm");
+      std::getline(comm, p.name);
+      if (p.name.empty()) p.name = "pid " + std::to_string(u.first);
+      out.push_back(p);
+    }
+    std::sort(out.begin(), out.end(), [](const GpuProcess& a, const GpuProcess& b) { return a.usedGB > b.usedGB; });
+  }
+  dlclose(lib);
+  return out;
 }
 
 }  // namespace ltxag

@@ -1,26 +1,49 @@
-"""LTX-2.5 Alpha Gen worker (the real one). Runs in the LTX-2 venv, launched by job.py.
+"""LTX-2.5 Alpha Gen worker (the real one). Runs in the LTX venv.
 
-Same process contract as dummy_worker.py (see its docstring), plus:
-  --model-dir DIR      expects diffusion_models/ text_encoders/ vae/ loras/ latent_upscale_models/
-  --embeddings FILE    cached prompt embeddings (safetensors). Built on first use if missing.
-  --seed N             default 1234 (the model card's sample seed)
+Three modes:
+  one-shot (job.py legacy / smoke tests):
+      --in F --chunks s:l,... --out-prefix P --model-dir M --embeddings E
+      [--precision bf16|fp8] [--colour <colour.SOURCES key>] [--ocio-config C]
+      stdout lines as in dummy_worker.py: info / progress / chunk_done / done / error
+  serve (resident worker, decisions 11/19/33):
+      --serve SOCKET --model-dir M --embeddings E --precision P [--flame-pid N]
+      [--idle-timeout S]
+      Loads the model once, then serves jobs over a Unix socket. Each connection sends one
+      JSON request line {"in", "chunks", "out_prefix", "colour", "ocio_config", "precision",
+      "model_dir", "unload", "seed"} and receives the same stdout-style lines back. A request
+      whose precision/model_dir differ gets "restart" and the server exits, so the client
+      starts a matching one. The server exits after a job with "unload": true, after
+      --idle-timeout seconds without jobs (default 300; $LTXAG_IDLE_TIMEOUT overrides), or
+      when --flame-pid dies. SOCKET.json holds {pid, precision, model_dir, state, vram_gb}.
+  --build-embeddings (child process, see build_embeddings).
 
-Recipe 1 (decision 15/16): the model-card IC-LoRA recipe, stage 1 only at native resolution
-(`ICLoraPipeline`, skip_stage_2, width/height passed as 2x), empty prompt, LoRA strength 1.0.
-Two injections into the pinned LTX-2 code (commit 9ec55f9):
-  - ic_lora.SequentialVideoFrameSource -> MemoryFrameSource: reference frames come from the
-    shim's /dev/shm input instead of a video file (no 8-bit re-encode).
-  - pipeline.prompt_encoder -> CachedPromptEncoder: the empty-prompt embedding is loaded from
-    disk, so Gemma is not loaded per job (decision 9; see CLAUDE.md for why the final
-    embedding is cached).
-Frames arrive display-referred in [0,1] (the shim converts colour); the model was trained on
-8-bit video, so they are scaled to [0,255] floats, the range the pipeline's reader produces.
+Recipe 1 (decisions 15/16): ICLoraPipeline, skip_stage_2 with 2x width/height, empty prompt,
+LoRA 1.0. Injections into the pinned LTX-2 code (commit 9ec55f9):
+  - ic_lora.SequentialVideoFrameSource -> MemoryFrameSource (in-memory reference frames);
+  - pipeline.prompt_encoder -> CachedPromptEncoder (no Gemma per job, decision 9);
+  - DiffusionStage._transformer_ctx -> build once, keep for the engine's lifetime
+    (upstream "builds on each call, frees on exit": 6.6 s per chunk at HD fp8). Safe because
+    the single-GPU Builder.build ignores the per-call video_tools kwarg (ARG002);
+  - pipeline.audio_decoder = None: video-only chunks (chunks/operators.py:285), saving ~2 s/chunk;
+  - samplers.tqdm -> a stepping wrapper that reports each denoising step (there is no callback;
+    euler_denoising_loop iterates tqdm(sigmas[:-1]), utils/samplers.py:72).
+Progress lines (besides info/chunk_done/done/error): "stage <chunk> <name>" (converting,
+preparing, denoising, decoding), "step <chunk> <k> <n>" after each denoising step, and at the
+end "vram <min_free_gb> <peak_alloc_gb> <peak_reserved_gb> <reserved_at_start_gb> <torch>": the lowest
+free device memory sampled during the job (cudaMemGetInfo, every 0.25 s), for comparing the
+plugin's estimate with what the job really took.
+  A ModelRegistry(cache_weights=True) was tried first and was worse (chunk 1 200 s, +16 GB).
+Frames arrive in the source colour space as float16; colour.Converter maps them to Rec.1886
+display values (decision 54), then they are scaled to [0,255] floats like the pipeline's reader.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -33,35 +56,38 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np  # noqa: E402
 
-from ltxag_worker import padding, transport  # noqa: E402
+from ltxag_worker import colour, padding, transport  # noqa: E402
+from ltxag_worker.log import Logger  # noqa: E402
 
 MEMORY_REF = "mem://ltxag-reference"
 SEED_DEFAULT = 1234
 FRAME_RATE = 24.0  # only feeds the model's timing embedding; mattes do not depend on it here
+IDLE_TIMEOUT_DEFAULT = 300.0  # decision 33
+
+log = Logger("worker")
 
 
-def say(*parts: object) -> None:
-    sys.stdout.write(" ".join(str(p) for p in parts) + "\n")
-    sys.stdout.flush()
-
-
-def watch_parent() -> None:
-    sys.stdin.read()
-    os._exit(3)
+class Cancelled(Exception):
+    """The client went away mid-job."""
 
 
 class MemoryFrameSource:
-    """Drop-in for ltx_pipelines.chunks.export.SequentialVideoFrameSource (take/close)."""
+    """Drop-in for ltx_pipelines.chunks.export.SequentialVideoFrameSource (take/close).
 
-    frames = None  # torch tensor (N, H, W, 3) float in [0,255] on the device, set per chunk
+    The chunk's frames stay in host memory and go to the GPU one at a time, as upstream's
+    decoder delivers them (chunks/export.py). Holding the whole chunk on the GPU as float32 cost
+    ~3.6 GB at HD x 145 (Flame test 2: an HD job used 8.6 GB more than estimated)."""
+
+    frames = None  # torch tensor (N, H, W, 3) float in [0,255], host memory (or GPU with --frames-on-gpu), set per chunk
 
     def __init__(self, path: str, device) -> None:  # noqa: ANN001 - torch.device
         if path != MEMORY_REF:
             raise ValueError(f"MemoryFrameSource only serves {MEMORY_REF}, got {path}")
+        self.device = device
 
     def take(self, start: int, count: int):
         f = MemoryFrameSource.frames
-        return iter([f[i : i + 1] for i in range(start, min(start + count, f.shape[0]))])
+        return (f[i : i + 1].to(self.device) for i in range(start, min(start + count, f.shape[0])))
 
     def close(self) -> None:
         pass
@@ -79,6 +105,17 @@ class CachedPromptEncoder:
         return [self.output]
 
 
+def model_paths_for(m: str) -> dict:
+    return {
+        "transformer": f"{m}/diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
+        "text_encoder": f"{m}/text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "video_vae": f"{m}/vae/ltx-2.5-video-vae-bf16.safetensors",
+        "audio_vae": f"{m}/vae/ltx-2.5-audio-vae-bf16.safetensors",
+        "upsampler": f"{m}/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+        "lora": f"{m}/loras/ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors",
+    }
+
+
 def file_id(path: str) -> str:
     st = os.stat(path)
     return f"{os.path.basename(path)}:{st.st_size}"
@@ -91,8 +128,8 @@ def embeddings_ident(transformer: str, text_encoder: str) -> str:
 def build_embeddings(path: str, transformer: str, text_encoder: str, video_vae: str) -> int:
     """Child-process mode: run Gemma once for the empty prompt, save, exit.
 
-    Runs in its own process because Gemma's ~26 GB were not fully returned before the
-    transformer loaded when this ran in-process (smoke test: OOM at 94 GB vs 45.5 GB without).
+    Its own process because Gemma's ~26 GB were not fully returned before the transformer
+    loaded when this ran in-process (smoke test: OOM at 94 GB vs 45.5 GB without).
     """
     import torch
     from safetensors.torch import save_file
@@ -114,37 +151,379 @@ def build_embeddings(path: str, transformer: str, text_encoder: str, video_vae: 
     save_file({k: v.contiguous().cpu() for k, v in tensors.items()}, tmp,
               metadata={"source": embeddings_ident(transformer, text_encoder), "prompt": ""})
     os.replace(tmp, path)
-    say("info", f"prompt embedding built in {time.time() - t0:.1f} s: {path} "
-                f"(video_encoding {tuple(out.video_encoding.shape)} {out.video_encoding.dtype})")
+    msg = (f"prompt embedding built in {time.time() - t0:.1f} s: {path} "
+           f"(video_encoding {tuple(out.video_encoding.shape)} {out.video_encoding.dtype})")
+    log.info(msg)
+    print("info", msg, flush=True)
     return 0
 
 
-def load_or_build_embeddings(device, path: str, paths: dict):  # noqa: ANN001 - torch.device
-    from safetensors import safe_open
-    from safetensors.torch import load_file
+class Engine:
+    """The loaded pipeline. One per process; serves any number of jobs."""
 
-    from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessorOutput
+    def __init__(self, model_dir: str, embeddings: str, precision: str, emit, keep_transformer: bool = True,
+                 frames_on_gpu: bool = False):
+        import torch
 
-    ident = embeddings_ident(paths["transformer"], paths["text_encoder"])
-    current = False
-    if os.path.exists(path):
-        with safe_open(path, framework="pt") as f:
-            current = (f.metadata() or {}).get("source") == ident
+        import ltx_pipelines.ic_lora as ic_lora
+        from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
+        from ltx_pipelines.utils.model_paths import ModelPaths
+        from ltx_pipelines.utils.quantization_factory import QuantizationKind
+
+        self.torch = torch
+        self.model_dir, self.precision = model_dir, precision
+        self.frames_on_gpu = frames_on_gpu  # A/B only: the pre-2026-10-11 behaviour
+        t0 = time.time()
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available to the worker")
+        emit("info", f"torch {torch.__version__} cuda {torch.version.cuda} gpu {torch.cuda.get_device_name(0)}")
+        paths = model_paths_for(model_dir)
+        missing = [k for k, p in paths.items() if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"model files missing in {model_dir}: {', '.join(missing)}")
+        # Before the pipeline exists, so a cache build (child process, Gemma) has the GPU to itself.
+        embedding = self._load_or_build_embeddings(embeddings, paths, emit)
+        ic_lora.SequentialVideoFrameSource = MemoryFrameSource  # injection 1
+        quant = QuantizationKind("fp8-cast").to_policy(paths["transformer"]) if precision == "fp8" else None
+        self.pipeline = ic_lora.ICLoraPipeline(
+            model_paths=ModelPaths.from_split(
+                transformer_path=paths["transformer"], text_encoder_path=paths["text_encoder"],
+                video_vae_path=paths["video_vae"], audio_vae_path=paths["audio_vae"]),
+            spatial_upsampler_path=paths["upsampler"],
+            loras=[LoraPathStrengthAndSDOps(paths["lora"], 1.0, LTXV_LORA_COMFY_RENAMING_MAP)],
+            quantization=quant)
+        self.pipeline.prompt_encoder = CachedPromptEncoder(embedding)  # injection 2
+        self.pipeline.audio_decoder = None  # injection 4: video-only output
+        self._on_step = lambda k, n: None
+        self._install_step_hook()  # injection 5
+        self._transformer, self._transformer_key = None, None
+        if keep_transformer:  # injection 3
+            # Class-level, keyed by checkpoint + LoRA set: ICLoraPipeline builds its base stage
+            # with loras=() and applies the IC-LoRA through stage.with_loras(), which copy.copy()s
+            # the stage. An instance-level patch was inherited by that copy and built the base
+            # model WITHOUT the LoRA (smoke test: the "matte" reproduced the input picture).
+            from ltx_pipelines.utils import blocks
+
+            original_ctx = blocks.DiffusionStage._transformer_ctx
+            engine = self
+
+            def resident_ctx(stage, **kwargs):
+                if stage._is_streaming:
+                    return original_ctx(stage, **kwargs)
+                builder = stage._transformer_builder
+                key = (str(builder.checkpoint), tuple((str(l.path), float(l.strength)) for l in builder.loras))
+                if engine._transformer_key != key:
+                    engine.drop_transformer()
+                    t1 = time.time()
+                    engine._transformer = stage._build_transformer(**kwargs)
+                    engine._transformer_key = key
+                    emit("info", f"transformer built in {time.time() - t1:.1f} s with "
+                                 f"{len(key[1])} LoRA(s); kept resident")
+                return contextlib.nullcontext(engine._transformer)
+
+            blocks.DiffusionStage._transformer_ctx = resident_ctx
+        torch.cuda.empty_cache()
+        emit("info", f"engine ready in {time.time() - t0:.1f} s (precision {precision}, "
+                     f"transformer {'resident' if keep_transformer else 'rebuilt per chunk'})")
+
+    def _install_step_hook(self) -> None:
+        from ltx_pipelines.utils import samplers
+
+        engine = self
+
+        def stepping(iterable, *_args, **_kwargs):
+            n = len(iterable)
+            for k, item in enumerate(iterable):
+                yield item
+                engine._on_step(k + 1, n)  # runs when the loop asks for the next step: step k done
+
+        samplers.tqdm = stepping
+
+    def drop_transformer(self) -> None:
+        """Free the resident transformer (after an OOM, so the next job starts clean)."""
+        self._transformer, self._transformer_key = None, None
+        self.torch.cuda.empty_cache()
+
+    def _load_or_build_embeddings(self, path: str, paths: dict, emit):
+        from safetensors import safe_open
+        from safetensors.torch import load_file
+
+        from ltx_core.text_encoders.gemma.embeddings_processor import EmbeddingsProcessorOutput
+
+        ident = embeddings_ident(paths["transformer"], paths["text_encoder"])
+        current = False
+        if os.path.exists(path):
+            with safe_open(path, framework="pt") as f:
+                current = (f.metadata() or {}).get("source") == ident
+            if not current:
+                emit("info", "prompt embedding cache was built for other model files; rebuilding")
         if not current:
-            say("info", "prompt embedding cache was built for other model files; rebuilding")
-    if not current:
-        say("progress", 0.0, "building prompt cache (one-time, loads Gemma)")
-        rc = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__), "--build-embeddings", path,
-                             "--transformer", paths["transformer"], "--text-encoder", paths["text_encoder"],
-                             "--video-vae", paths["video_vae"]], stdin=subprocess.DEVNULL).returncode
-        if rc != 0 or not os.path.exists(path):
-            raise RuntimeError(f"building the prompt embedding cache failed (exit {rc})")
-    t = load_file(path, device=str(device))
-    say("info", f"prompt embedding loaded from {path}")
-    return EmbeddingsProcessorOutput(t["video_encoding"], t.get("audio_encoding"), t["attention_mask"])
+            emit("progress", 0.0, "building prompt cache (one-time, loads Gemma)")
+            rc = subprocess.run([sys.executable, "-I", "-B", os.path.abspath(__file__), "--build-embeddings", path,
+                                 "--transformer", paths["transformer"], "--text-encoder", paths["text_encoder"],
+                                 "--video-vae", paths["video_vae"]], stdin=subprocess.DEVNULL).returncode
+            if rc != 0 or not os.path.exists(path):
+                raise RuntimeError(f"building the prompt embedding cache failed (exit {rc})")
+        t = load_file(path, device="cuda")
+        emit("info", f"prompt embedding loaded from {path}")
+        return EmbeddingsProcessorOutput(t["video_encoding"], t.get("audio_encoding"), t["attention_mask"])
+
+    def vram_gb(self) -> float:
+        return self.torch.cuda.memory_reserved() / 2**30
+
+    def run(self, inp: str, chunks, out_prefix: str, conv: colour.Converter, emit, seed: int = SEED_DEFAULT):
+        torch = self.torch
+        emit("info", conv.describe())
+        reserved_start = torch.cuda.memory_reserved() / 2**30
+        self.job_peak = [0.0, 0.0]  # allocated, reserved: max over the chunks (peaks reset per chunk)
+        min_free = [torch.cuda.mem_get_info()[0] / 2**30]
+        sampling = threading.Event()
+
+        def sample():
+            while not sampling.wait(0.25):
+                min_free[0] = min(min_free[0], torch.cuda.mem_get_info()[0] / 2**30)
+
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
+        try:
+            self._run_chunks(inp, chunks, out_prefix, conv, emit, seed, min_free)
+        finally:
+            sampling.set()
+            sampler.join()
+            self._on_step = lambda k, n: None
+            with contextlib.suppress(Exception):  # also after an OOM: that is the most useful sample
+                emit("vram", f"{min_free[0]:.2f}", f"{self.job_peak[0]:.2f}", f"{self.job_peak[1]:.2f}",
+                     f"{reserved_start:.2f}", torch.__version__)
+
+    def _run_chunks(self, inp, chunks, out_prefix, conv, emit, seed, min_free) -> None:  # noqa: ANN001
+        torch = self.torch
+        for i, (start, length) in enumerate(chunks):
+            label = f"chunk {i + 1}/{len(chunks)}"
+            t0 = time.time()
+            torch.cuda.reset_peak_memory_stats()
+            alloc_start = torch.cuda.memory_allocated() / 2**30
+            emit("stage", i, "converting" if conv.active else "preparing")
+            frames = conv.apply(transport.read_frames_range(args_safe(inp), start, length))  # (n,h,w,3) f32
+            n, h, w, _ = frames.shape
+            padded, (top, left) = padding.pad_spatial(frames)
+            padded = padding.pad_temporal(padded)
+            np_, hp, wp = padded.shape[0], padded.shape[1], padded.shape[2]
+            frames_t = torch.from_numpy(np.ascontiguousarray(padded))
+            if self.frames_on_gpu:
+                frames_t = frames_t.to("cuda")
+            MemoryFrameSource.frames = frames_t.clamp_(0.0, 1.0).mul_(255.0)
+            emit("info", f"{label}: in {n}x{w}x{h} -> model {np_}x{wp}x{hp} (input ready in {time.time() - t0:.1f} s)")
+            emit("stage", i, "denoising")
+
+            def on_step(k: int, steps: int, i: int = i) -> None:
+                emit("step", i, k, steps)
+                if k == steps:
+                    emit("stage", i, "decoding")
+
+            self._on_step = on_step
+            with torch.inference_mode():
+                # stream_chunks, not __call__: __call__'s pipeline_output_from_chunks insists on audio,
+                # and audio decoding is disabled (injection 4).
+                decoded, _, _ = self.pipeline.stream_chunks(
+                    prompt="", seed=seed, height=hp * 2, width=wp * 2, num_frames=np_, frame_rate=FRAME_RATE,
+                    images=[], video_conditioning=[(MEMORY_REF, 1.0)], skip_stage_2=True)
+                video = torch.cat([c.video.to("cpu") for c in decoded], dim=0)  # (F,H,W,C) bf16 in [0,1]
+            MemoryFrameSource.frames = None
+            v = video.float()
+            if video.dtype == torch.uint8 or float(v.max()) > 1.5:
+                v = v / 255.0
+            matte = v.mean(dim=-1).clamp_(0.0, 1.0).numpy()  # grayscale matte: average channels
+            if matte.shape[1:] != (hp, wp):
+                raise RuntimeError(f"decoded size {matte.shape[1:]} != model size {(hp, wp)}")
+            transport.write_mattes(f"{out_prefix}_{i}.bin", padding.crop(matte, n, top, left, h, w))
+            peak_a, peak_r = torch.cuda.max_memory_allocated() / 2**30, torch.cuda.max_memory_reserved() / 2**30
+            self.job_peak = [max(self.job_peak[0], peak_a), max(self.job_peak[1], peak_r)]
+            emit("info", f"{label}: done in {time.time() - t0:.1f} s, allocated at start {alloc_start:.1f} GB, "
+                         f"peak allocated {peak_a:.1f} GB, peak reserved {peak_r:.1f} GB, allocated now "
+                         f"{torch.cuda.memory_allocated() / 2**30:.1f} GB, reserved now {self.vram_gb():.1f} GB, "
+                         f"lowest free {min_free[0]:.1f} GB")
+            emit("chunk_done", i)
 
 
-def main() -> int:  # noqa: PLR0915 - one linear job
+def args_safe(path: str) -> str:
+    if not path.startswith("/dev/shm/"):
+        raise ValueError(f"input must be in /dev/shm, got {path}")
+    return path
+
+
+def classify(exc: BaseException) -> tuple[str, str]:
+    import torch
+
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return "oom", f"CUDA out of memory: {str(exc).splitlines()[0]}"
+    if isinstance(exc, FileNotFoundError):
+        return "input", str(exc)
+    first = str(exc).splitlines()[0] if str(exc) else ""
+    return "internal", f"{type(exc).__name__}: {first}"
+
+
+# --------------------------------------------------------------------------- one-shot mode
+def one_shot(a) -> int:  # noqa: ANN001
+    def emit(*parts):
+        sys.stdout.write(" ".join(str(p) for p in parts) + "\n")
+        sys.stdout.flush()
+
+    threading.Thread(target=lambda: (sys.stdin.read(), os._exit(3)), daemon=True).start()
+    t0 = time.time()
+    emit("info", f"python={sys.executable} {sys.version.split()[0]} pid={os.getpid()}")
+    try:
+        conv = colour.Converter(a.colour, a.ocio_config)
+        engine = Engine(a.model_dir, a.embeddings, a.precision, emit, keep_transformer=not a.rebuild_transformer,
+                        frames_on_gpu=a.frames_on_gpu)
+        engine.run(a.inp, [tuple(int(v) for v in c.split(":")) for c in a.chunks.split(",")],
+                   a.out_prefix, conv, emit, a.seed)
+    except Exception as exc:  # noqa: BLE001 - report everything, with traceback
+        kind, msg = classify(exc)
+        emit("error", kind, msg)
+        traceback.print_exc(file=sys.stdout)
+        return 2
+    emit("info", f"job finished in {time.time() - t0:.1f} s")
+    emit("done")
+    return 0
+
+
+# --------------------------------------------------------------------------- serve mode
+class Server:
+    def __init__(self, a) -> None:  # noqa: ANN001
+        self.a = a
+        self.sock_path, self.info_path = a.serve, a.serve + ".json"
+        self.idle = float(os.environ.get("LTXAG_IDLE_TIMEOUT", a.idle_timeout))
+        self.engine = None
+
+    def write_info(self, state: str, message: str = "") -> None:
+        info = {"pid": os.getpid(), "precision": self.a.precision, "model_dir": self.a.model_dir,
+                "state": state, "message": message, "time": time.time(),
+                "vram_gb": round(self.engine.vram_gb(), 2) if self.engine else 0.0}
+        tmp = f"{self.info_path}.tmp{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(info, f)
+        os.replace(tmp, self.info_path)
+
+    def flame_alive(self) -> bool:
+        pid = self.a.flame_pid
+        if not pid:
+            return True
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def serve(self) -> int:
+        os.makedirs(os.path.dirname(self.sock_path), exist_ok=True)
+        log.info(f"server starting: precision={self.a.precision} model_dir={self.a.model_dir} "
+                 f"idle_timeout={self.idle:.0f}s flame_pid={self.a.flame_pid}")
+        self.write_info("loading")
+        try:
+            self.engine = Engine(self.a.model_dir, self.a.embeddings, self.a.precision,
+                                 lambda *p: log.info(" ".join(str(x) for x in p)),
+                                 keep_transformer=not self.a.rebuild_transformer,
+                                 frames_on_gpu=self.a.frames_on_gpu)
+        except Exception as exc:  # noqa: BLE001
+            kind, msg = classify(exc)
+            log.error(f"server failed to load: {kind} {msg}\n{traceback.format_exc()}")
+            self.write_info("failed", f"{kind} {msg}")
+            return 2
+        try:
+            os.unlink(self.sock_path)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(self.sock_path)
+        os.chmod(self.sock_path, 0o600)
+        srv.listen(8)
+        srv.settimeout(1.0)
+        self.write_info("ready")
+        log.info(f"server ready on {self.sock_path}, reserved {self.engine.vram_gb():.1f} GB")
+        last = time.time()
+        reason = ""
+        try:
+            while True:
+                if not self.flame_alive():
+                    reason = f"Flame (pid {self.a.flame_pid}) is gone"
+                    break
+                if time.time() - last > self.idle:
+                    reason = f"idle for {self.idle:.0f} s"
+                    break
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                with conn:
+                    outcome = self.handle(conn)
+                last = time.time()
+                if outcome in ("unload", "restart"):
+                    reason = "unload requested" if outcome == "unload" else "restart for other settings"
+                    break
+        finally:
+            srv.close()
+            for p in (self.sock_path, self.info_path):
+                try:
+                    os.unlink(p)
+                except FileNotFoundError:
+                    pass
+            log.info(f"server exiting: {reason}")
+        return 0
+
+    def handle(self, conn: socket.socket) -> str:
+        conn.settimeout(None)
+        f = conn.makefile("rwb", buffering=0)
+
+        def emit(*parts):
+            try:
+                f.write((" ".join(str(p) for p in parts) + "\n").encode())
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                raise Cancelled() from exc
+
+        try:
+            req = json.loads(f.readline().decode() or "{}")
+        except json.JSONDecodeError as exc:
+            emit("error", "input", f"bad request: {exc}")
+            return "ok"
+        if req.get("ping"):
+            emit("pong", self.a.precision, self.a.model_dir)
+            return "ok"
+        if req.get("precision") != self.a.precision or req.get("model_dir") != self.a.model_dir:
+            log.info(f"request needs precision={req.get('precision')} model_dir={req.get('model_dir')}; restarting")
+            emit("restart")
+            return "restart"
+        self.write_info("busy")
+        log.job = req.get("job_id", "-")
+        t0 = time.time()
+        log.info(f"job start (resident engine reused): chunks={req['chunks']} colour={req.get('colour')} "
+                 f"unload={req.get('unload')}")
+        try:
+            conv = colour.Converter(req.get("colour", "Bypass"), req.get("ocio_config", ""))
+            self.engine.run(req["in"], [tuple(c) for c in req["chunks"]], req["out_prefix"], conv, emit,
+                            int(req.get("seed", SEED_DEFAULT)))
+            emit("done")
+            log.info(f"job done in {time.time() - t0:.1f} s")
+        except Cancelled:
+            log.warn("client disconnected mid-job; job abandoned")
+        except Exception as exc:  # noqa: BLE001
+            kind, msg = classify(exc)
+            log.error(f"job failed: {kind} {msg}\n{traceback.format_exc()}")
+            try:
+                emit("error", kind, msg)
+            except Cancelled:
+                pass
+            if kind == "oom":
+                self.engine.drop_transformer()
+        finally:
+            MemoryFrameSource.frames = None
+            log.job = "-"
+            self.write_info("ready")
+        return "unload" if req.get("unload", True) else "ok"
+
+
+def main() -> int:
     if "--build-embeddings" in sys.argv:
         bp = argparse.ArgumentParser()
         bp.add_argument("--build-embeddings", required=True)
@@ -154,114 +533,34 @@ def main() -> int:  # noqa: PLR0915 - one linear job
         b = bp.parse_args()
         return build_embeddings(b.build_embeddings, b.transformer, b.text_encoder, b.video_vae)
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True)
-    ap.add_argument("--chunks", required=True)
-    ap.add_argument("--out-prefix", required=True)
+    ap.add_argument("--serve", default=None, help="Unix socket path: run as resident server")
+    ap.add_argument("--in", dest="inp", default=None)
+    ap.add_argument("--chunks", default=None)
+    ap.add_argument("--out-prefix", default=None)
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--embeddings", required=True)
     ap.add_argument("--precision", default="bf16", choices=["bf16", "fp8"])
+    ap.add_argument("--colour", default="Bypass", choices=list(colour.SOURCES))
+    ap.add_argument("--ocio-config", default="")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
+    ap.add_argument("--flame-pid", type=int, default=0)
+    ap.add_argument("--idle-timeout", type=float, default=IDLE_TIMEOUT_DEFAULT)
+    ap.add_argument("--rebuild-transformer", action="store_true", help="A/B: upstream behaviour, rebuild per chunk")
+    ap.add_argument("--frames-on-gpu", action="store_true", help="A/B: whole chunk on the GPU (pre-2026-10-11)")
+    ap.add_argument("--profile", action="store_true", help="timestamped LTX library logging to stdout")
     ap.add_argument("--seconds", default=None, help="ignored (dummy worker option)")
     ap.add_argument("--simulate", default="none", help="ignored (dummy worker option)")
-    args = ap.parse_args()
-    chunks = [tuple(int(v) for v in c.split(":")) for c in args.chunks.split(",")]
-    threading.Thread(target=watch_parent, daemon=True).start()
+    a = ap.parse_args()
+    if a.profile:
+        import logging
 
-    t_start = time.time()
-    say("info", f"python={sys.executable} {sys.version.split()[0]} pid={os.getpid()}")
-    say("progress", 0.0, "loading torch")
-    try:
-        import torch
-
-        import ltx_pipelines.ic_lora as ic_lora
-        from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
-        from ltx_pipelines.utils.model_paths import ModelPaths
-        from ltx_pipelines.utils.quantization_factory import QuantizationKind
-    except Exception as exc:  # noqa: BLE001
-        say("error", "internal", f"cannot import the LTX runtime: {exc!r}")
-        traceback.print_exc(file=sys.stdout)
-        return 2
-    say("info", f"torch {torch.__version__} cuda {torch.version.cuda} "
-                f"gpu {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE'}")
-    if not torch.cuda.is_available():
-        say("error", "internal", "CUDA is not available to the worker")
-        return 2
-
-    m = args.model_dir
-    paths = {
-        "transformer": f"{m}/diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
-        "text_encoder": f"{m}/text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
-        "video_vae": f"{m}/vae/ltx-2.5-video-vae-bf16.safetensors",
-        "audio_vae": f"{m}/vae/ltx-2.5-audio-vae-bf16.safetensors",
-        "upsampler": f"{m}/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
-        "lora": f"{m}/loras/ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors",
-    }
-    missing = [k for k, p in paths.items() if not os.path.exists(p)]
-    if missing:
-        say("error", "input", f"model files missing in {m}: {', '.join(missing)}")
-        return 2
-
-    try:
-        # Before the pipeline exists, so a cache build (child process, Gemma) has the GPU to itself.
-        embedding = load_or_build_embeddings(torch.device("cuda"), args.embeddings, paths)
-        ic_lora.SequentialVideoFrameSource = MemoryFrameSource  # injection 1
-        model_paths = ModelPaths.from_split(
-            transformer_path=paths["transformer"], text_encoder_path=paths["text_encoder"],
-            video_vae_path=paths["video_vae"], audio_vae_path=paths["audio_vae"])
-        quant = QuantizationKind("fp8-cast").to_policy(paths["transformer"]) if args.precision == "fp8" else None
-        pipeline = ic_lora.ICLoraPipeline(
-            model_paths=model_paths, spatial_upsampler_path=paths["upsampler"],
-            loras=[LoraPathStrengthAndSDOps(paths["lora"], 1.0, LTXV_LORA_COMFY_RENAMING_MAP)],
-            quantization=quant)
-        pipeline.prompt_encoder = CachedPromptEncoder(embedding)  # injection 2
-        torch.cuda.empty_cache()
-        say("info", f"pipeline ready in {time.time() - t_start:.1f} s (precision {args.precision})")
-
-        torch.cuda.reset_peak_memory_stats()
-        device = pipeline.device
-        for i, (start, length) in enumerate(chunks):
-            label = f"chunk {i + 1}/{len(chunks)}"
-            t0 = time.time()
-            say("progress", round(i / len(chunks), 4), f"{label}: preparing")
-            frames = transport.read_frames_range(args.inp, start, length)  # (n,h,w,3) fp16 in [0,1]
-            n, h, w, _ = frames.shape
-            padded, (top, left) = padding.pad_spatial(frames)
-            padded = padding.pad_temporal(padded)
-            np_, hp, wp = padded.shape[0], padded.shape[1], padded.shape[2]
-            MemoryFrameSource.frames = (torch.from_numpy(np.ascontiguousarray(padded)).to(device)
-                                        .float().clamp_(0.0, 1.0).mul_(255.0))
-            say("info", f"{label}: in {n}x{w}x{h} -> model {np_}x{wp}x{hp}")
-            say("progress", round((i + 0.1) / len(chunks), 4), f"{label}: generating")
-            with torch.inference_mode():
-                out = pipeline(prompt="", seed=args.seed, height=hp * 2, width=wp * 2, num_frames=np_,
-                               frame_rate=FRAME_RATE, images=[], video_conditioning=[(MEMORY_REF, 1.0)],
-                               skip_stage_2=True)
-                video = torch.cat([v.to("cpu") for v in out.video], dim=0)  # (F,H,W,C)
-            if i == 0:
-                say("info", f"decoded video {tuple(video.shape)} {video.dtype} "
-                            f"min {float(video.min()):.3f} max {float(video.max()):.3f}")
-            v = video.float()
-            if video.dtype == torch.uint8 or float(v.max()) > 1.5:
-                v = v / 255.0
-            matte = v.mean(dim=-1).clamp_(0.0, 1.0).numpy()  # grayscale matte: average channels
-            if matte.shape[1:] != (hp, wp):
-                raise RuntimeError(f"decoded size {matte.shape[1:]} != model size {(hp, wp)}")
-            transport.write_mattes(f"{args.out_prefix}_{i}.bin", padding.crop(matte, n, top, left, h, w))
-            MemoryFrameSource.frames = None
-            say("info", f"{label}: done in {time.time() - t0:.1f} s, "
-                        f"peak allocated {torch.cuda.max_memory_allocated() / 2**30:.1f} GB")
-            say("chunk_done", i)
-            say("progress", round((i + 1) / len(chunks), 4), f"{label}: done")
-    except torch.cuda.OutOfMemoryError as exc:
-        say("error", "oom", f"CUDA out of memory: {str(exc).splitlines()[0]}")
-        return 2
-    except Exception as exc:  # noqa: BLE001 - report everything, with traceback, to the job log
-        say("error", "internal", f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}")
-        traceback.print_exc(file=sys.stdout)
-        return 2
-    say("info", f"job finished in {time.time() - t_start:.1f} s")
-    say("done")
-    return 0
+        logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                            format="profile %(asctime)s.%(msecs)03d %(name)s: %(message)s", datefmt="%H:%M:%S")
+    if a.serve:
+        return Server(a).serve()
+    if not (a.inp and a.chunks and a.out_prefix):
+        ap.error("one-shot mode needs --in, --chunks and --out-prefix")
+    return one_shot(a)
 
 
 if __name__ == "__main__":

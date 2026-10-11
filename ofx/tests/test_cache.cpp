@@ -79,6 +79,10 @@ int main() {
   std::ofstream(pendingPath(root, "bbbbbbbbbbbbbbbb")) << deadPid();
   CHECK(isPending(root, "aaaaaaaaaaaaaaaa"), "live job not pending");
   CHECK(!isPending(root, "bbbbbbbbbbbbbbbb"), "dead job still pending");
+  markPending(root, {"cccccccccccccccc", "dddddddddddddddd"}, getpid());
+  CHECK(isPending(root, "cccccccccccccccc") && isPending(root, "dddddddddddddddd"), "markPending");
+  clearPending(root, {"cccccccccccccccc", "dddddddddddddddd"});
+  CHECK(!isPending(root, "cccccccccccccccc"), "clearPending left a marker");
 
   // Sweep: age limit, then LRU down to the cap.
   CacheSettings s;

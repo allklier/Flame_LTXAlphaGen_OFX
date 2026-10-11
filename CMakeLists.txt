@@ -9,10 +9,18 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence gate" ON)
-set(LTXAG_VERSION "0.3.0")
-# Build identity for the log's environment snapshot (decision 39).
-execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short HEAD
-  OUTPUT_VARIABLE LTXAG_GIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+# Release version (v0.1 = first release, user 2026-10-11; the prototypes reported 0.3.0).
+# Also the OFX plugin version (major.minor) and the release package name.
+set(LTXAG_VERSION "0.1.0")
+string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
+list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
+list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)
+# Build identity for the log's environment snapshot (decision 39). -DLTXAG_GIT=<hash> overrides
+# it (scripts/package_release.sh builds from a copy without .git).
+if(NOT LTXAG_GIT)
+  execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short HEAD
+    OUTPUT_VARIABLE LTXAG_GIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
 if(NOT LTXAG_GIT)
   set(LTXAG_GIT "nogit")
 endif()
@@ -34,7 +42,7 @@ target_include_directories(ofx_support PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Supp
 target_compile_options(ofx_support PRIVATE -w -fvisibility=hidden)
 
 # Pure logic, shared with the unit tests.
-add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp)
+add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp)
 target_include_directories(ltxag_core PUBLIC ofx/src)
 
 add_library(${BUNDLE_NAME} MODULE
@@ -49,7 +57,8 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/env_info.cpp)
 target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support ltxag_core dl pthread)
 target_compile_definitions(${BUNDLE_NAME} PRIVATE LTXAG_DEV_BUILD=$<BOOL:${LTXAG_DEV_BUILD}>
-  LTXAG_VERSION="${LTXAG_VERSION}" LTXAG_GIT="${LTXAG_GIT}")
+  LTXAG_VERSION="${LTXAG_VERSION}" LTXAG_GIT="${LTXAG_GIT}"
+  LTXAG_VERSION_MAJOR=${LTXAG_VERSION_MAJOR} LTXAG_VERSION_MINOR=${LTXAG_VERSION_MINOR})
 target_compile_options(${BUNDLE_NAME} PRIVATE -Wall -Wextra -Wno-deprecated-declarations -Wno-deprecated
   -fvisibility=hidden)
 # Export only the two OFX entry points. libstdc++ is linked dynamically: Flame
@@ -75,11 +84,13 @@ add_custom_target(bundle_resources ALL
           ${BUNDLE_DIR}/Contents/Resources/helper
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/helper/licence.txt
           ${BUNDLE_DIR}/Contents/Resources/licence.txt
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/flame_hook
+          ${BUNDLE_DIR}/Contents/Resources/flame_hook
   DEPENDS ${BUNDLE_NAME})
 
 enable_testing()
 # Python used by the worker tests; needs numpy importable in isolated mode (-I),
-# exactly as the plugin launches it. On akflame5 /usr/bin/python3 qualifies.
+# exactly as the plugin launches it. On Rocky 9 /usr/bin/python3 qualifies.
 set(WORKER_TEST_PYTHON /usr/bin/python3 CACHE FILEPATH "Python for worker tests")
 add_executable(test_chunk_plan ofx/tests/test_chunk_plan.cpp)
 target_link_libraries(test_chunk_plan PRIVATE ltxag_core)
@@ -103,6 +114,10 @@ add_executable(test_marker_log ofx/tests/test_marker_log.cpp ofx/src/marker.cpp 
   ofx/src/user_config.cpp)
 target_include_directories(test_marker_log PRIVATE ofx/src)
 add_test(NAME marker_log COMMAND test_marker_log)
+
+add_executable(test_vram_estimate ofx/tests/test_vram_estimate.cpp)
+target_link_libraries(test_vram_estimate PRIVATE ltxag_core)
+add_test(NAME vram_estimate COMMAND test_vram_estimate)
 
 add_executable(test_load_bundle ofx/tests/test_load_bundle.cpp)
 target_include_directories(test_load_bundle PRIVATE ${OFX_DIR}/include)
