@@ -1,0 +1,55 @@
+# Prototype test in Flame (build step 2)
+
+**Goal:** before any model work, find out whether Flame's OFX host supports the design.
+**Setup:** the prototype runs the real plugin flow against a **dummy worker**, which needs no GPU
+and no model. Its "matte" is the luminance of each source frame, so wrong frames, flips or bad
+padding would be visible straight away.
+**Logging:** every OFX action is logged to `~/.cache/ltx-alphagen/proto.log` on akflame5. Claude
+reads that log afterwards, so you only need to note what you **see**.
+
+## Install (once, needs sudo)
+
+```bash
+sudo ln -s /home/allklier/LTX_OFX_build/build/LTXAlphaGen.ofx.bundle /usr/OFX/Plugins/LTXAlphaGen.ofx.bundle
+```
+
+After that, rebuilds (`scripts/build_akflame5.sh`) only need a Flame restart. If new or renamed
+params don't show up after a rebuild, Flame may be caching the plugin description. Note it if that happens.
+
+Before each session, it helps to clear the log: `rm -f ~/.cache/ltx-alphagen/proto.log`.
+
+## Tests
+
+Start Flame 2027.1. Use a Batch with an HD clip, 32-bit float if possible.
+
+| # | Do | Look for | Risk it tests |
+|---|---|---|---|
+| 1 | Add **LTX › LTX Alpha Gen (prototype)** in Batch. | The node exists, with three pages: Settings, Model, Prototype. | Plugin loads |
+| 2 | Connect a clip of **≤145 frames** and view a frame. | About 20 s of work, then a grey **luminance** image. Is there a **progress bar**? Is the **UI frozen** while it runs? Then scrub: other frames should appear instantly. | Temporal fetch, long blocking render, progress, RAM cache |
+| 3 | Use a clip of **~300 frames** and view frames 0, 100 and 250. | Each first view of a new chunk takes ~20 s; the rest are instant. No visible seams or wrong frames. | Chunking, crossfade, frame mapping |
+| 4 | **Purge Cache**, set **Simulated Seconds = 120**, view a frame, then **cancel** (Esc, or whatever Flame offers) after a few seconds. | Does it stop promptly? Does Flame stay usable? | Cancel |
+| 5 | Set **Simulate = oom**, Purge Cache, view a frame. Repeat with **crash**. Then set Simulate back to none and **Simulated VRAM Need = 500**. | An error message on the node or in the message area each time. Flame stays alive. | Error reporting, crash isolation, preflight |
+| 6 | Set **Simulate = hang**, view a frame, then **quit Flame** while it's working. After it exits, run `pgrep -af dummy_worker`. | No leftover worker process. | Worker exits with Flame |
+| 7 | **Model** page: tick *I Accept*, type `hf_TESTTOKEN123` as the token, set a Model Folder, press **Download (prototype)**. | A small progress window appears (~15 s) and Flame stays responsive. The token field clears and Status shows "Helper launched …". | Detached helper, token handling, status updates |
+| 8 | Untick *I Accept* and press Download again. | An error popup. | Message suite |
+| 9 | Save the Batch setup, then run `grep -rl TESTTOKEN ~/flame /opt/Autodesk/project 2>/dev/null` (or wherever your setups live). | **Nothing found.** | Token never saved |
+| 10 | Settings: set **Precision = fp8**, **Headroom = 3**, untick **Unload**, press **Save as My Default**. Then **add a new node** in the same session. | Does the new node show fp8 / 3 / unticked? | User defaults, same session |
+| 11 | Restart Flame, add a new node. Then load the setup saved in test 9. | The new node shows fp8 / 3 / unticked. The node in the old setup keeps the values it had. | User defaults across sessions; hidden `initialized` flag is saved |
+| 12 | Put a Colour Correct before the node, view a cached frame, change the CC. | Our output updates (recomputes). | Cache invalidation on upstream change |
+| 13 | Optional: a UHD or 6K clip of ~145 frames. | Time to first image. | Fetch cost at large sizes |
+
+Afterwards, to reset the user defaults: `rm ~/.config/ltx-alphagen/config.conf`.
+
+## What to report back
+
+Short notes per test number, e.g. "2: progress bar yes, UI frozen". Claude reads the log for the rest.
+
+- Loaded fine, and clip showed for 145, and even 300+ frames before I trimmed batch. However, UI freezes for several seconds. Is there a way to change the node name to give indicating that load is in progress? If not, in Flame status bar as well.
+- purging cache and changing batch sizes forced reload of frames. Never saw a cancel button.
+- simulate OOM worked.
+- simulate 500 NVRAM showed no error
+- sumulate hang, no dummy worker left
+- Node cache is loaded when batch loads. Makes batch loads very slow. Is there a way of delaying loading until some just-in-time point?
+
+
+

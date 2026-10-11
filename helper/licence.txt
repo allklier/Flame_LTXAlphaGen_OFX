@@ -1,0 +1,15 @@
+LTX-2.x Community License Agreement (Lightricks) — PROTOTYPE SUMMARY, NOT THE LICENCE TEXT
+
+The release build will show the full licence text, downloaded from
+https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x
+
+Key points (summary only, not legal advice):
+- Free for entities with annual revenue below USD 10,000,000 (affiliates combined).
+- At or above that, a paid commercial licence from Lightricks is required
+  (ltxv-licensing@lightricks.com).
+- Use restrictions in Attachment A apply to you and to anyone you let use the model.
+- The model weights are gated on Hugging Face: you must also accept the terms there
+  with your own account before downloading.
+
+This plugin does not include or redistribute the model or Lightricks' code.
+You download them yourself and are responsible for your own licence.
