@@ -333,7 +333,7 @@ colour conversion; bf16 and fp8; a resident model with Unload GPU; a clip-size-a
 with a warning; a progress window with time left; automatic viewer refresh; the disk matte cache;
 chunking for long clips; logging and Collect Logs.
 
-**Not yet built:**
+### On the roadmap
 
 - 6K and larger frames (the decoder refuses them).
 - Disk staging for very long clips. The whole clip is staged in `/dev/shm` (about 12.5 MB per HD
@@ -341,6 +341,8 @@ chunking for long clips; logging and Collect Logs.
 - Processing only the frames that are not cached yet. Process always processes the whole clip.
 - Background Reactor rendering is untested (Batch Render works).
 - An offline install of the Python packages for workstations without internet.
+- Support half-chunk rendering for low VRAM GPUs
+- Native metal implementation on MacOS
 
 ## Support and logs
 
