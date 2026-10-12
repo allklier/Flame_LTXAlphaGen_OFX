@@ -52,8 +52,8 @@ struct SweepResult {
 // Also clears pending markers of dead jobs.
 SweepResult sweepCache(const CacheSettings& s);
 
-// Removes /dev/shm/ltxag_* files whose owner is gone (test 1 left a 1.5 GB orphan).
-size_t sweepStaleShm();
+// Removes stagingDir()/ltxag_* files whose owner is gone (test 1 left a 1.5 GB orphan).
+size_t sweepStaleStaging();
 
 bool pidAlive(int pid);
 

@@ -1,10 +1,16 @@
-#include "nvml.h"
-
+// Linux GPU memory (decision 64): NVML, loaded with dlopen so the plugin has no link-time
+// dependency on the driver. Function names and the memory struct verified against pynvml on the
+// reference machine (nvmlInitWithFlags, nvmlDeviceGetHandleByIndex_v2, nvmlDeviceGetMemoryInfo
+// {total, free, used}, nvmlDeviceGetName(handle, char*, uint), nvmlSystemGetDriverVersion(char*,
+// uint)). Per-process use: nvmlDeviceGet{Compute,Graphics}RunningProcesses_v3(handle, uint* count,
+// nvmlProcessInfo_t*), struct {uint pid; ull usedGpuMemory; uint gpuInstanceId; uint
+// computeInstanceId} (layout checked against nvidia-smi on the reference machine, tools/nvml_probe.cpp).
 #include <dlfcn.h>
 
 #include <algorithm>
-#include <fstream>
 #include <map>
+
+#include "platform.h"
 
 namespace ltxag {
 
@@ -89,8 +95,7 @@ std::vector<GpuProcess> queryGpuProcesses() {
       GpuProcess p;
       p.pid = u.first;
       p.usedGB = u.second;
-      std::ifstream comm("/proc/" + std::to_string(u.first) + "/comm");
-      std::getline(comm, p.name);
+      p.name = processName(u.first);
       if (p.name.empty()) p.name = "pid " + std::to_string(u.first);
       out.push_back(p);
     }

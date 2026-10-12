@@ -1,4 +1,4 @@
-// Frame exchange with the worker through files in /dev/shm (RAM-backed).
+// Frame exchange with the worker through files in stagingDir() (RAM-backed /dev/shm on Linux).
 // Layout must match worker/ltxag_worker/transport.py.
 // Files are written and read with write()/pread(), never mmap: a full tmpfs then
 // fails with ENOSPC instead of raising SIGBUS inside the Flame process.
@@ -24,13 +24,13 @@ struct FrameFileHeader {
 #pragma pack(pop)
 static_assert(sizeof(FrameFileHeader) == 24, "header must be 24 bytes");
 
-// A uniquely named file in /dev/shm, unlinked when this object dies.
-class ShmFile {
+// A uniquely named file in stagingDir(), unlinked when this object dies.
+class StagingFile {
  public:
-  explicit ShmFile(const std::string& tag);
-  ~ShmFile();
-  ShmFile(const ShmFile&) = delete;
-  ShmFile& operator=(const ShmFile&) = delete;
+  explicit StagingFile(const std::string& tag);
+  ~StagingFile();
+  StagingFile(const StagingFile&) = delete;
+  StagingFile& operator=(const StagingFile&) = delete;
   const std::string& path() const { return path_; }
 
  private:

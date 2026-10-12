@@ -2,12 +2,13 @@
 
   python -I -B job.py <manifest.json> [--no-ui]
 
-The shim has already staged every source frame in /dev/shm and computed each frame's
+The shim has already staged every source frame in its staging folder (the manifest's folder,
+/dev/shm on Linux; decision 64) and computed each frame's
 cache key and crossfade contributions. This process, outside Flame:
-  - shows its own progress window with a Cancel button (zenity),
+  - shows its own progress window with a Cancel button (ltxag_worker/oslayer.py),
   - runs the worker once for all chunks (the real model will load once per job),
   - blends overlapping chunks and writes one matte per frame into the disk cache,
-  - always cleans up its /dev/shm files and pending markers, and records a final status.
+  - always cleans up its staged files and pending markers, and records a final status.
 Manifest fields: job_id node_id input width height frames chunks[[start,len]] frame_keys[]
 contrib[[[chunk,weight],...]] cache_root worker [worker_python] [worker_args[]] seconds simulate
 precision title. ROI (decision 63): width/height are then the CROP staged in `input`, plus
@@ -35,7 +36,6 @@ import fcntl
 import json
 import os
 import queue
-import shutil
 import signal
 import socket
 import subprocess
@@ -47,57 +47,40 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
 
-from ltxag_worker import cache, morph, transport  # noqa: E402
+from ltxag_worker import cache, morph, oslayer, transport  # noqa: E402
 from ltxag_worker.log import Logger, log_path  # noqa: E402
 
 log = Logger("job")
 
 
 class Progress:
-    """zenity --progress window; cancelled() is True once the user pressed Cancel."""
+    """The progress window; cancelled() is True once the user pressed Cancel."""
 
     def __init__(self, title: str, enabled: bool) -> None:
-        self.proc = None
+        self.win = oslayer.ProgressWindow(title, 560, enabled)
         self.finished = False
         self.lock = threading.Lock()  # the main loop and the 1 s ticker both write
-        zenity = shutil.which("zenity") if enabled else None
-        if zenity:
-            self.proc = subprocess.Popen(
-                [zenity, "--progress", f"--title={title}", "--text=Starting...",
-                 "--percentage=0", "--auto-close", "--width=560"],
-                stdin=subprocess.PIPE, text=True)
 
     def update(self, frac: float, text: str) -> None:
         with self.lock:
-            if not self.proc or self.proc.poll() is not None or self.finished:
+            if not self.win.shown or self.win.gone() or self.finished:
                 return
-            pct = max(0, min(99, int(frac * 100)))  # 100 auto-closes; sent only by close()
             try:
-                self.proc.stdin.write(f"# {text}\n{pct}\n")
-                self.proc.stdin.flush()
+                self.win.show(frac, text)
             except BrokenPipeError:
                 pass
 
     def cancelled(self) -> bool:
-        return bool(self.proc) and not self.finished and self.proc.poll() is not None
+        return not self.finished and self.win.gone()
 
     def close(self) -> None:
         with self.lock:
             self.finished = True
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.stdin.write("100\n")
-                self.proc.stdin.close()
-            except BrokenPipeError:
-                pass
-            self.proc.wait(timeout=5)
+        self.win.close(wait=5)
 
     @staticmethod
     def error(title: str, text: str, enabled: bool) -> None:
-        zenity = shutil.which("zenity") if enabled else None
-        if zenity:
-            subprocess.Popen([zenity, "--error", f"--title={title}", f"--text={text}", "--width=420"],
-                             start_new_session=True)
+        oslayer.message("error", title, text, 420, enabled)
 
 
 def mmss(seconds: float) -> str:
@@ -250,11 +233,7 @@ REFRESH_DIR = os.path.expanduser("~/.cache/ltx-alphagen/run/refresh")
 def started_by_flame(pid: int) -> bool:
     """True if pid is a live Flame process (not a smoke tool or test, which must not make the
     hook step the frame in a Flame session that happens to be open)."""
-    try:
-        with open(f"/proc/{int(pid)}/comm") as f:
-            return f.read().strip() == "flame"
-    except (OSError, ValueError):
-        return False
+    return oslayer.process_name(pid) == "flame"
 
 
 def signal_refresh(job_id: str, node_id: str, state: str) -> None:
@@ -449,8 +428,9 @@ def main() -> int:
     log.node, log.job = m.get("node_id", "-"), job_id
     keys, contrib, chunks = m["frame_keys"], m["contrib"], m["chunks"]
     roi, merge = m.get("roi"), m.get("merge", "smooth")
-    out_prefix = f"/dev/shm/ltxag_job_{job_id}_out"
-    pid_file = f"/dev/shm/ltxag_job_{job_id}.pid"
+    staging = os.path.dirname(os.path.abspath(manifest_path))  # the plugin's stagingDir()
+    out_prefix = os.path.join(staging, f"ltxag_job_{job_id}_out")
+    pid_file = os.path.join(staging, f"ltxag_job_{job_id}.pid")
     with open(pid_file, "w") as f:
         f.write(str(os.getpid()))
     cache.mark_pending(root, keys, os.getpid())

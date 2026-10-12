@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fstream>
 
+#include "platform.h"
 #include "transport.h"
 
 namespace ltxag {
@@ -189,12 +190,13 @@ SweepResult sweepCache(const CacheSettings& s) {
   return r;
 }
 
-size_t sweepStaleShm() {
+size_t sweepStaleStaging() {
   // ltxag_<flame pid>_<seq>_*.bin : transient files of a Flame process -> owner must be alive.
   // ltxag_job_<id>[_...|.ext]     : handed to a job (<id> has no '_' or '.');
   //                                 ltxag_job_<id>.pid names the job's pid.
   size_t removed = 0;
-  const auto files = listDir("/dev/shm");
+  const std::string dir = stagingDir();
+  const auto files = listDir(dir);
   const time_t now = time(nullptr);
   const std::string jobPrefix = "ltxag_job_";
   auto jobBase = [&](const std::string& f) {
@@ -205,13 +207,13 @@ size_t sweepStaleShm() {
   std::vector<std::string> deadJobs, liveJobs;
   for (const auto& f : files)
     if (f.rfind(jobPrefix, 0) == 0 && endsWith(f, ".pid"))
-      (pidAlive(readPid("/dev/shm/" + f)) ? liveJobs : deadJobs).push_back(jobBase(f));
+      (pidAlive(readPid(dir + "/" + f)) ? liveJobs : deadJobs).push_back(jobBase(f));
   auto contains = [](const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
   };
   for (const auto& f : files) {
     if (f.rfind("ltxag_", 0) != 0) continue;
-    const std::string p = "/dev/shm/" + f;
+    const std::string p = dir + "/" + f;
     bool stale = false;
     if (f.rfind(jobPrefix, 0) == 0) {
       const std::string base = jobBase(f);

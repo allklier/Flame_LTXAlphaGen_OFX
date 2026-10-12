@@ -15,7 +15,7 @@ Steps (decisions 2/7/9/13/20/51), all pinned by model_manifest.json next to this
               (hashing while downloading). Verification = size + SHA-256 from the manifest.
   3 prompt    build the empty-prompt embedding cache (worker --build-embeddings, own process)
   4 config    model_dir, ltx_python, runtime_commit, models_ready in ~/.config/ltx-alphagen
-Progress and Cancel in a zenity window. Everything is logged (ltxag_worker/log.py).
+Progress and Cancel in a window (ltxag_worker/oslayer.py). Everything is logged (ltxag_worker/log.py).
 """
 
 from __future__ import annotations
@@ -37,10 +37,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER_DIR = os.path.join(HERE, "..", "worker")
 sys.path.insert(0, WORKER_DIR)
 
+from ltxag_worker import oslayer  # noqa: E402
 from ltxag_worker.log import Logger  # noqa: E402
 
 CONFIG = os.path.expanduser("~/.config/ltx-alphagen/config.conf")
 CHUNK = 8 << 20
+TITLE = "LTX Alpha Gen - setup"
 log = Logger("setup")
 
 
@@ -53,47 +55,33 @@ class SetupError(Exception):
 
 
 class Progress:
-    """zenity --progress; text + percentage; cancel detection."""
+    """The setup progress window: text + percentage; cancel detection."""
 
     def __init__(self, enabled: bool) -> None:
-        self.proc = None
+        self.win = oslayer.ProgressWindow(TITLE, 520, enabled)
         self.lock = threading.Lock()  # the step and the size watcher both write
-        z = shutil.which("zenity") if enabled else None
-        if z:
-            self.proc = subprocess.Popen([z, "--progress", "--title=LTX Alpha Gen - setup", "--text=Starting...",
-                                          "--percentage=0", "--auto-close", "--width=520"],
-                                         stdin=subprocess.PIPE, text=True)
         self.done = False
 
     def update(self, frac: float, text: str) -> None:
         if self.cancelled():
             raise Cancelled()
-        if self.proc:
+        if self.win.shown:
             with self.lock:
                 try:
-                    self.proc.stdin.write(f"# {text}\n{max(0, min(99, int(frac * 100)))}\n")
-                    self.proc.stdin.flush()
+                    self.win.show(frac, text)
                 except BrokenPipeError as exc:
                     raise Cancelled() from exc
 
     def cancelled(self) -> bool:
-        return bool(self.proc) and not self.done and self.proc.poll() is not None
+        return not self.done and self.win.gone()
 
     def close(self) -> None:
         self.done = True
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.stdin.write("100\n")
-                self.proc.stdin.close()
-            except BrokenPipeError:
-                pass
+        self.win.close()
 
     @staticmethod
     def message(kind: str, text: str, enabled: bool) -> None:
-        z = shutil.which("zenity") if enabled else None
-        if z:
-            subprocess.Popen([z, f"--{kind}", "--title=LTX Alpha Gen - setup", f"--text={text}", "--width=520"],
-                             start_new_session=True)
+        oslayer.message(kind, TITLE, text, 520, enabled)
 
 
 def human(n: float) -> str:

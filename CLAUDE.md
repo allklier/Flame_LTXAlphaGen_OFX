@@ -57,7 +57,7 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
   - **Warning with Yes/No (built):** the preflight asks `sendMessage(eMessageQuestion)`; Yes
     processes, No cancels; if the host doesn't ask (reply neither Yes nor No) it proceeds with a
     footer warning. The message lists the estimate, free + LTX worker − reserve, and what Flame
-    and other apps hold (NVML per process, `nvml.cpp`). A live resident worker's memory always
+    and other apps hold (NVML per process, `platform_linux_nvml.cpp`). A live resident worker's memory always
     counts as available whatever its precision, because a mismatch restarts it (counting only a
     matching precision caused false refusals).
   - **Step 1, record every run (built):** the manifest carries the preflight numbers (estimate,
@@ -211,6 +211,25 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
     plugin's watcher clears them if no job status appears within 60 s.
 - **50.** No more prototype rounds; the plugin is developed and tested as the real thing.
 
+**Platforms**
+- **64.** **OS-specific code sits behind one small layer per language** (DECIDED, user
+  2026-10-12, prep for the macOS/MLX port; done on `main` as a pure refactor, then the
+  `macos-mlx` branch is rebased onto it). C++: `ofx/src/platform.h` (`stagingDir`, `queryVram`,
+  `queryGpuProcesses`, `processName`, `platformSnapshot`, `showTextFile`), implemented in
+  `platform_linux.cpp` + `platform_linux_nvml.cpp`, chosen in CMakeLists.txt (another OS stops
+  configure with an error until it has its own files). Python: `worker/ltxag_worker/oslayer.py`
+  (the progress window with Cancel, message windows, `process_name`), shared by job.py and
+  setup_helper.py. job.py takes the staging folder from its manifest's folder, so only the plugin
+  knows it. Linux behaviour is unchanged (same zenity calls, same snapshot lines; the "NVML
+  unavailable" texts now read "GPU memory unavailable"/"memory query unavailable").
+  - **Not in the layer, on purpose:** the inference backend (CUDA/torch/LTX-2 vs MLX) is a
+    separate axis from the OS. The worker line protocol and the manifest are already its
+    boundary, so an MLX worker speaks the same protocol. The backend-only parts (an MLX runtime
+    in Setup, a `backend` manifest field and cache-key part, MLX constants in `vram_estimate`)
+    are built on `macos-mlx`, where they can be tested. `half.h` (F16C) and `process.cpp`
+    (`pipe2`, `posix_spawn_file_actions_addclosefrom_np`) get their macOS variants inside those
+    files on that branch. `ltx_worker.py` (CUDA, requires input in /dev/shm) stays Linux-only.
+
 ## Architecture (as built)
 
 ```
@@ -239,8 +258,9 @@ Flame Python hook: polls refresh markers → steps the current frame and back
 - `ofx/src/process.*`: `posix_spawn` with its own process group and a cleaned env (strips
   `PYTHON*`, `LD_LIBRARY_PATH`, `LD_PRELOAD`, `HF_TOKEN`); detached launch via `sh &`.
 - `ofx/src/vram_estimate.*`: the memory model (decision 34/56).
-- `ofx/src/log.*`, `env_info.*`, `marker.*` (marker + overlay), `nvml.*` (dlopen; device and
-  per-process memory), `user_config.*`, `half.h` (F16C).
+- `ofx/src/platform.h` (decision 64): `platform_linux.cpp` (staging in /dev/shm, /proc, zenity
+  licence window) and `platform_linux_nvml.cpp` (NVML via dlopen; device and per-process memory).
+- `ofx/src/log.*`, `env_info.*`, `marker.*` (marker + overlay), `user_config.*`, `half.h` (F16C).
 - `worker/job.py`: the detached job controller (resident/subprocess channels, progress Tracker,
   VRAM record, refresh marker). Manifest: `job_id node_id input width height frames chunks
   contrib frame_keys cache_root worker [worker_python worker_args worker_socket model_dir unload
@@ -249,7 +269,7 @@ Flame Python hook: polls refresh markers → steps the current frame and back
   `width/height` are the crop).
 - `worker/ltx_worker.py`: the real worker (see "Worker"). `worker/dummy_worker.py`: a luminance
   "matte" with `--simulate oom|crash|hang`, same line protocol.
-- `worker/ltxag_worker/{padding,transport,cache,log,colour,morph}.py`.
+- `worker/ltxag_worker/{padding,transport,cache,log,colour,morph,oslayer}.py`.
 - `helper/setup_helper.py` (Setup), `helper/model_manifest.json`, `helper/ltx2-uv.lock`,
   `helper/licence.txt` (full LTX-2.x licence + header).
 - `flame_hook/ltx_alphagen_hook.py`: the Flame Python hook (decision 49), copied into the

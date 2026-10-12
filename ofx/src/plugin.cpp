@@ -1,7 +1,7 @@
 // LTX Alpha Gen OFX — PROTOTYPE round 3 (CLAUDE.md decisions 35–43).
 // - Render never runs the model: it serves mattes from the disk cache, else a faint
 //   "no media"-style marker (Flame calls render on its UI thread — Flame test 1).
-// - Process stages the clip's frames in /dev/shm and launches a detached job
+// - Process stages the clip's frames in stagingDir() and launches a detached job
 //   (worker/job.py) with its own progress window and Cancel button.
 // - A watcher thread follows the job and nudges Flame to re-render (decision 42, option a:
 //   setting params outside an action breaks the OFX threading rules — experiment, toggleable).
@@ -39,8 +39,8 @@
 #include "half.h"
 #include "log.h"
 #include "marker.h"
-#include "nvml.h"
 #include "ofxsImageEffect.h"
+#include "platform.h"
 #include "process.h"
 #include "roi.h"
 #include "transport.h"
@@ -237,7 +237,7 @@ Defaults computeDefaults() {
       estimateVramNeed(false, kDefaultCheckW, kDefaultCheckH, kDefaultCheckFrames, false).gb;
   d.precision = (v.ok && v.freeGB - d.headroomGB < bf16Need) ? 1 : 0;
   std::string src = v.ok ? "built-in (free " + fmtGB(v.freeGB) + " of " + fmtGB(v.totalGB) + " GB)"
-                         : "built-in (NVML unavailable)";
+                         : "built-in (GPU memory unavailable)";
   const UserConfig cfg = loadUserConfig();
   if (cfg.count("precision")) d.precision = cfg.at("precision") == "fp8" ? 1 : 0;
   if (cfg.count("headroom_gb")) d.headroomGB = std::atof(cfg.at("headroom_gb").c_str());
@@ -648,9 +648,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       saveAsDefault();
     } else if (name == kPViewLicence) {
       std::string err;
-      const bool ok = launchDetached({"/usr/bin/zenity", "--text-info", "--title=LTX-2.x Licence",
-                                      "--filename=" + licencePath(), "--width=640", "--height=520"},
-                                     cleanEnvironment(), err);
+      const bool ok = showTextFile("LTX-2.x Licence", licencePath(), cleanEnvironment(), err);
       if (ok)
         LOGI("viewLicence: window opened");
       else
@@ -961,7 +959,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const std::string jobId = std::to_string(getpid()) + "-" + std::to_string(gJobSeq++) + "-" +
                               std::to_string(std::time(nullptr));
     LogScope scope(nodeId_, jobId);
-    const std::string input = "/dev/shm/ltxag_job_" + jobId + "_in.bin";
+    const std::string input = stagingDir() + "/ltxag_job_" + jobId + "_in.bin";
     LOGI("process: t=%g clip [%d,%d] %d frames, %d chunk(s), params %s", time, first,
          first + n - 1, n, int(chunks.size()), sig.c_str());
 
@@ -1076,7 +1074,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
        << ",\"precision\":" << jsonStr(kPrecisions[prec]) << ",\"vram\":" << vramJson
        << ",\"flame_pid\":" << getpid()
        << ",\"title\":" << jsonStr("LTX Alpha Gen - " + std::to_string(n) + " frames") << "}";
-    const std::string manifest = "/dev/shm/ltxag_job_" + jobId + ".json";
+    const std::string manifest = stagingDir() + "/ltxag_job_" + jobId + ".json";
     {
       std::ofstream mf(manifest);
       mf << js.str();
@@ -1334,11 +1332,11 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     LOGI("==== plugin load (describe) ====");
     for (const auto& line : environmentSnapshot(hostInfo(), resourcesDir()))
       LOGI("env %s", line.c_str());
-    const size_t shm = sweepStaleShm();
+    const size_t staged = sweepStaleStaging();
     const SweepResult sw = sweepCache(cacheSettings(loadUserConfig()));
-    LOGI("sweep: %zu stale /dev/shm file(s); cache aged %zu, capped %zu, kept %zu (%.1f MB), "
+    LOGI("sweep: %zu stale staging file(s); cache aged %zu, capped %zu, kept %zu (%.1f MB), "
          "freed %.1f MB",
-         shm, sw.aged, sw.capped, sw.kept, sw.bytesKept / 1048576.0, sw.bytesFreed / 1048576.0);
+         staged, sw.aged, sw.capped, sw.kept, sw.bytesKept / 1048576.0, sw.bytesFreed / 1048576.0);
     desc.setLabels(kPluginLabel, kPluginLabel, kPluginLabel);
     desc.setPluginGrouping("LTX");
     desc.addSupportedContext(OFX::eContextFilter);

@@ -1,5 +1,5 @@
 // End-to-end check of the shim <-> worker contract without an OFX host:
-// write frames to /dev/shm, run the dummy worker as the plugin does, read the
+// write frames to stagingDir(), run the dummy worker as the plugin does, read the
 // mattes back and compare with the expected luminance. Also checks cancel (kill)
 // and that the worker exits when its stdin closes.
 // Usage: test_worker_roundtrip <python> <dummy_worker.py>
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
   // 1. Round trip: 10 frames of 70x45 (pads to 96x64 and 17 frames inside the worker).
   const uint32_t W = 70, H = 45, N = 10;
   {
-    ShmFile in("in"), out("out");
+    StagingFile in("in"), out("out");
     FrameWriter fw;
     std::string err;
     CHECK(fw.open(in.path(), W, H, N, err), "open: %s", err.c_str());
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
 
   // 2. Simulated OOM is reported as an error line, not a crash.
   {
-    ShmFile in("in"), out("out");
+    StagingFile in("in"), out("out");
     std::vector<std::string> lines;
     int status = 0;
     runWorker({py, "-I", "-B", script, "--in", in.path(), "--chunks", "0:1", "--out-prefix", out.path(), "--seconds", "0.1",
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
 
   // 3. Crash: the worker dies by signal; we only see a status.
   {
-    ShmFile in("in"), out("out");
+    StagingFile in("in"), out("out");
     std::vector<std::string> lines;
     int status = 0;
     runWorker({py, "-I", "-B", script, "--in", in.path(), "--chunks", "0:1", "--out-prefix", out.path(), "--seconds", "0.1",
@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
 
   // 4. Cancel: a hanging worker is killed promptly.
   {
-    ShmFile in("in"), out("out");
+    StagingFile in("in"), out("out");
     WorkerProcess w;
     std::string err;
     CHECK(w.start({py, "-I", "-B", script, "--in", in.path(), "--chunks", "0:1", "--out-prefix", out.path(), "--seconds", "0.1",
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
 
   // 5. Parent gone: closing the worker's stdin makes it exit on its own (status 3).
   {
-    ShmFile in("in"), out("out");
+    StagingFile in("in"), out("out");
     int toChild[2];
     CHECK(pipe(toChild) == 0, "pipe");
     const pid_t pid = fork();

@@ -7,6 +7,8 @@
 #include <cerrno>
 #include <cstring>
 
+#include "platform.h"
+
 namespace ltxag {
 
 namespace {
@@ -27,12 +29,12 @@ bool writeAll(int fd, const void* data, size_t len) {
 }
 }  // namespace
 
-ShmFile::ShmFile(const std::string& tag) {
-  path_ = "/dev/shm/ltxag_" + std::to_string(getpid()) + "_" + std::to_string(gSeq++) + "_" +
+StagingFile::StagingFile(const std::string& tag) {
+  path_ = stagingDir() + "/ltxag_" + std::to_string(getpid()) + "_" + std::to_string(gSeq++) + "_" +
           tag + ".bin";
 }
 
-ShmFile::~ShmFile() { ::unlink(path_.c_str()); }
+StagingFile::~StagingFile() { ::unlink(path_.c_str()); }
 
 bool FrameWriter::open(const std::string& path, uint32_t w, uint32_t h, uint32_t n,
                        std::string& err) {
@@ -46,7 +48,7 @@ bool FrameWriter::open(const std::string& path, uint32_t w, uint32_t h, uint32_t
   const off_t total = off_t(sizeof(FrameFileHeader)) + off_t(frameBytes_) * n;
   const int rc = ::posix_fallocate(fd_, 0, total);
   if (rc != 0) {
-    err = "not enough space in /dev/shm for " + std::to_string(total >> 20) +
+    err = "not enough space in " + stagingDir() + " for " + std::to_string(total >> 20) +
           " MB of frames: " + std::strerror(rc);
     return false;
   }

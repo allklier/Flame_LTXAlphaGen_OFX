@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cache.h"
+#include "platform.h"
 #include "transport.h"
 
 using namespace ltxag;
@@ -108,19 +109,19 @@ int main() {
   CHECK(cacheBytes(root) > 0, "cacheBytes");
   CHECK(purgeAll(root) > 0 && cacheBytes(root) == 0, "purgeAll");
 
-  // /dev/shm sweep: dead-owner files go, live-owner and live-job files stay.
+  // Staging sweep: dead-owner files go, live-owner and live-job files stay.
   const int dead = deadPid();
-  const std::string deadFile = "/dev/shm/ltxag_" + std::to_string(dead) + "_0_in.bin";
-  const std::string liveFile = "/dev/shm/ltxag_" + std::to_string(getpid()) + "_0_in.bin";
-  const std::string jobLive = "/dev/shm/ltxag_job_t" + std::to_string(getpid()) + "-1";
-  const std::string jobDead = "/dev/shm/ltxag_job_t" + std::to_string(dead) + "-2";
+  const std::string deadFile = stagingDir() + "/ltxag_" + std::to_string(dead) + "_0_in.bin";
+  const std::string liveFile = stagingDir() + "/ltxag_" + std::to_string(getpid()) + "_0_in.bin";
+  const std::string jobLive = stagingDir() + "/ltxag_job_t" + std::to_string(getpid()) + "-1";
+  const std::string jobDead = stagingDir() + "/ltxag_job_t" + std::to_string(dead) + "-2";
   std::ofstream(deadFile) << "x";
   std::ofstream(liveFile) << "x";
   std::ofstream(jobLive + "_in.bin") << "x";
   std::ofstream(jobLive + ".pid") << getpid();
   std::ofstream(jobDead + "_in.bin") << "x";
   std::ofstream(jobDead + ".pid") << dead;
-  sweepStaleShm();
+  sweepStaleStaging();
   CHECK(!exists(deadFile), "dead-owner shm file kept");
   CHECK(exists(liveFile), "live-owner shm file removed");
   CHECK(exists(jobLive + "_in.bin") && exists(jobLive + ".pid"), "live job files removed");

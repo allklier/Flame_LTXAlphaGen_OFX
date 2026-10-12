@@ -42,6 +42,13 @@ add_library(ofx_support STATIC
 target_include_directories(ofx_support PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Support/include)
 target_compile_options(ofx_support PRIVATE -w -fvisibility=hidden)
 
+# OS-specific sources behind ofx/src/platform.h (decision 64).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(LTXAG_PLATFORM_SOURCES ofx/src/platform_linux.cpp ofx/src/platform_linux_nvml.cpp)
+else()
+  message(FATAL_ERROR "No platform layer for ${CMAKE_SYSTEM_NAME} (ofx/src/platform.h)")
+endif()
+
 # Pure logic, shared with the unit tests.
 add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp ofx/src/roi.cpp)
 target_include_directories(ltxag_core PUBLIC ofx/src)
@@ -50,7 +57,7 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/plugin.cpp
   ofx/src/log.cpp
   ofx/src/user_config.cpp
-  ofx/src/nvml.cpp
+  ${LTXAG_PLATFORM_SOURCES}
   ofx/src/transport.cpp
   ofx/src/process.cpp
   ofx/src/cache.cpp
@@ -100,14 +107,16 @@ add_test(NAME worker_python
   COMMAND ${WORKER_TEST_PYTHON} -B -m unittest discover -s ${CMAKE_SOURCE_DIR}/worker/tests)
 
 add_executable(test_worker_roundtrip ofx/tests/test_worker_roundtrip.cpp ofx/src/transport.cpp
-  ofx/src/process.cpp)
+  ofx/src/process.cpp ${LTXAG_PLATFORM_SOURCES})
+target_link_libraries(test_worker_roundtrip PRIVATE dl)
 target_include_directories(test_worker_roundtrip PRIVATE ofx/src)
 add_dependencies(test_worker_roundtrip bundle_resources)
 add_test(NAME worker_roundtrip
   COMMAND test_worker_roundtrip ${WORKER_TEST_PYTHON} ${BUNDLE_DIR}/Contents/Resources/worker/dummy_worker.py)
 
 add_executable(test_cache ofx/tests/test_cache.cpp ofx/src/cache.cpp ofx/src/transport.cpp
-  ofx/src/user_config.cpp)
+  ofx/src/user_config.cpp ofx/src/process.cpp ${LTXAG_PLATFORM_SOURCES})
+target_link_libraries(test_cache PRIVATE dl)
 target_include_directories(test_cache PRIVATE ofx/src)
 add_test(NAME cache COMMAND test_cache)
 

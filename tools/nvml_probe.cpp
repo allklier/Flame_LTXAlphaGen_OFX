@@ -1,8 +1,9 @@
 // Prints queryVram() and queryGpuProcesses() so they can be compared with nvidia-smi.
-//   g++ -std=c++14 -I ofx/src tools/nvml_probe.cpp ofx/src/nvml.cpp -ldl -o nvml_probe
+//   g++ -std=c++14 -I ofx/src tools/nvml_probe.cpp ofx/src/platform_linux_nvml.cpp \
+//       ofx/src/platform_linux.cpp ofx/src/process.cpp -ldl -o nvml_probe
 #include <cstdio>
 
-#include "nvml.h"
+#include "platform.h"
 
 int main() {
   const ltxag::VramInfo v = ltxag::queryVram();

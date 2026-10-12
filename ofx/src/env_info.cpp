@@ -1,17 +1,10 @@
 #include "env_info.h"
 
-#include <gnu/libc-version.h>
-#include <sys/statvfs.h>
-#include <sys/sysinfo.h>
-#include <sys/utsname.h>
-#include <unistd.h>
-
 #include <cstdio>
-#include <fstream>
 
 #include "cache.h"
 #include "log.h"
-#include "nvml.h"
+#include "platform.h"
 #include "user_config.h"
 
 #ifndef LTXAG_VERSION
@@ -27,14 +20,6 @@
 namespace ltxag {
 
 namespace {
-std::string firstMatch(const char* path, const std::string& prefix) {
-  std::ifstream in(path);
-  std::string line;
-  while (std::getline(in, line))
-    if (line.rfind(prefix, 0) == 0) return line.substr(prefix.size());
-  return "unknown";
-}
-
 std::string gb(double bytes) {
   char b[32];
   std::snprintf(b, sizeof b, "%.1f GB", bytes / 1073741824.0);
@@ -48,24 +33,11 @@ std::vector<std::string> environmentSnapshot(const HostInfo& host, const std::st
                 " built " + __DATE__ + " " + __TIME__ + (LTXAG_DEV_BUILD ? " (dev build)" : ""));
   out.push_back("host: " + host.name + " / " + host.label + " version " + host.version +
                 (host.background ? " (background render host)" : ""));
-  utsname u{};
-  uname(&u);
-  std::string os = firstMatch("/etc/os-release", "PRETTY_NAME=");
-  out.push_back("os: " + os + ", kernel " + u.release + ", glibc " + gnu_get_libc_version());
-  out.push_back("cpu: " + firstMatch("/proc/cpuinfo", "model name\t: ") + ", " +
-                std::to_string(sysconf(_SC_NPROCESSORS_ONLN)) + " threads");
-  struct sysinfo si {};
-  sysinfo(&si);
-  out.push_back("ram: " + gb(double(si.totalram) * si.mem_unit) + " total, " +
-                gb(double(si.freeram) * si.mem_unit) + " free");
-  struct statvfs vs {};
-  if (statvfs("/dev/shm", &vs) == 0)
-    out.push_back("dev/shm: " + gb(double(vs.f_blocks) * vs.f_frsize) + " total, " +
-                  gb(double(vs.f_bavail) * vs.f_frsize) + " free");
+  for (const auto& line : platformSnapshot()) out.push_back(line);
   const VramInfo v = queryVram();
   out.push_back(v.ok ? "gpu: " + v.name + ", driver " + v.driver + ", " + gb(v.totalGB * 1073741824.0) +
                            " total, " + gb(v.freeGB * 1073741824.0) + " free"
-                     : std::string("gpu: NVML unavailable"));
+                     : std::string("gpu: memory query unavailable"));
   out.push_back("resources: " + resources);
   out.push_back("log: " + logPath());
   out.push_back("config: " + userConfigPath());
