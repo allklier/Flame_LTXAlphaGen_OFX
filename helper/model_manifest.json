@@ -18,7 +18,9 @@
   ],
   "runtime": {
     "note": "uv cache size after a fresh uv sync of ltx2-uv.lock (measured 6627332375 bytes incl. pip_extra, Rocky 9.7, 2026-10-11); only drives the setup progress bar",
-    "uv_cache_bytes": 6600000000
+    "uv_cache_bytes": 6600000000,
+    "python": "3.14.7",
+    "python_note": "uv-managed Python used for the runtime (uv sync --managed-python --python); the version every test ran on"
   },
   "files": [
     {

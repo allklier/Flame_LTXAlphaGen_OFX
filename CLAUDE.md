@@ -91,6 +91,14 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
   `mozilla.org/media/MPL/2.0/index.txt`. MPL is file-level copyleft: our files stay MPL; the
   vendored OpenFX files keep their BSD licence (in their headers); the LTX code and weights are
   never in the repo (LTX-2.x Community License, installed by the user).
+- **60.** **The runtime uses uv's own Python, pinned (3.14.7), never a system Python.** LTX-2
+  only asks for ≥ 3.10, so uv used whatever qualified: on Rocky's 3.9 it downloaded 3.14.7, but a
+  user's system Python 3.12 got picked up, and without `python3.12-devel` Triton's C build failed
+  at the prompt cache step (`Python.h: No such file`). Setup now runs `uv sync --managed-python
+  --python <manifest runtime.python>`: the same Python everywhere, with its headers; an existing
+  venv on another Python is recreated. Triton also needs a **C compiler** ($CC, else gcc, else
+  clang; `triton/runtime/build.py:26-39`): Setup checks for one before any download, and the
+  runtime smoke test checks `Python.h`. (0.1.2, from a user report.)
 - **57.** **No bundled Python packages.** Licences would allow bundling torch etc. (only the LTX
   code must not be bundled; NVIDIA's CUDA wheels have their own redistribution terms). But the
   venv is 6.4 GB (NVIDIA CUDA libs 3.1 GB, torch 1.1, triton 0.7; the LTX packages a few MB):
@@ -196,7 +204,7 @@ Flame Python hook: polls refresh markers → steps the current frame and back
   nvidia-smi).
 - `third_party/openfx`: OpenFX `OFX_Release_1_4_TAG`, `include/` + `Support/` only (BSD,
   `VENDORED.txt`).
-- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.1; the OFX
+- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.2; the OFX
   version is its major.minor), grouping "LTX". `LTXAG_DEV_BUILD=ON` (the CMake default, for local
   tests) adds a Prototype page: Sim Seconds, Simulate, Sim VRAM GB, Worker Python, Enforce Gate,
   Auto Refresh, Use Dummy. Release builds (`OFF`) hide those params but still define them, so
@@ -463,6 +471,12 @@ process per run incl. model load, Gemma loaded and freed in process):
 
 - **6K:** try the conv VAE / DiffVAE modes / `--tile`.
 - Large jobs: disk staging when `/dev/shm` is too small; skip already-cached chunks.
+- **Chunk length for 48 GB cards (PROPOSED, 2026-10-12):** chunks are fixed at 145 frames, so on
+  a 48 GB card (e.g. RTX 6000 Ada) HD fp8 needs ~42 GB of ~45 GB free and only just fits next to
+  Flame; Unload off (~58 GB) can't. Offer a Chunk Length (or pick the longest that fits): ~35 GB
+  at 97 frames, ~28 GB at 49, at the cost of more crossfade seams. Ada itself is supported by
+  fp8-cast (the Triton upcast needs sm_89+, `ltx_core/quantization/fp8_cast.py:62-95`);
+  speed and natten kernels on Ada are UNVERIFIED.
 - Background Reactor check (`hostIsBackground`, cached mattes).
 - Decision 56 step 2 (local estimate correction), once `vram_stats.csv` data exists.
 - An offline install of the Python packages (decision 57).

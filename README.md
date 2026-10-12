@@ -10,6 +10,40 @@ and no ComfyUI.
 > real footage. Setup is guided, and the viewer refreshes by itself when a job finishes. See
 > [Status and roadmap](#status-and-roadmap) for what is not built yet.
 
+## Quick Start
+
+(read full details further down)
+
+- Download the release bundle, unpack it, and run install.sh with 'sudo'
+- Launch Flame, setup a new batch group and add 'LTX Alpha Gen' OFX node after a media file
+- The first run requires some setup. Open the plugin's Setup tab:
+
+1. View the license file. You are responsible for meeting all LTX license requirements, and
+respecting the revenue threshold (USD 10M) above which you need a paid licence from Lightricks.
+2. If satisfied, tick 'I Accept' to unlock the rest of the functions.
+3. You need to enter your Hugging Face token to facilitate the download. If you don't have
+one yet, sign up for a free account to generate one, and accept the terms of the two LTX
+model repos there (see Setup below).
+4. You can change the folder where models will be stored from the default.
+5. Important: if you have previously downloaded these model files, you can provide the 
+folder where they are ('Existing Models'), and the plugin will copy them locally instead of
+re-downloading them.
+6. Click 'Download'. This will download ~80GB and can take 30+ minutes depending on your 
+Internet connection. You will see a progress bar during this time.
+7. Switch to the main tab of the plugin for the rest.
+8. If your media is not in Rec709, set the color space your media is in. The plugin will
+convert it to fit the model's requirements.
+9. Check the precision of the model. The plugin will automatically check your GPU and 
+available VRAM and guide you. If you're low on VRAM, it may be useful to go to the Flame
+Resource Manager and purge unused VRAM so the plugin can use it.
+10. If you process multiple media, uncheck 'Unload GPU' and the model will be kept in
+memory reducing runtime considerably. This needs more VRAM: on a 48 GB card, leave it on.
+11. Click the 'Process' button to run the model. It will show a progress bar and time
+estimate. Once the processing is complete it will automatically update the viewer. 
+The image output will show an overlay, and the matte output will have the matte.
+12. The output is cached locally to avoid re-running the model. If you're done you 
+may want to use the 'Purge Cache' button to purge those files. 
+
 ## Origins
 
 Originally written by Jan Klier and contributed to the Logik community of Autodesk Flame
@@ -39,6 +73,10 @@ following the guidelines at https://github.com/flamelogik
   plus space for the matte cache (about 4 MB per HD frame).
 - Internet access during Setup (Hugging Face, GitHub, PyPI). After Setup, processing runs offline.
 - Flame's own NVIDIA driver is sufficient (verified with driver 580.159.04, torch 2.13, CUDA 13.2).
+- A **C compiler** (`gcc`): the GPU code compiles small helpers while it runs. Most Flame systems
+  have it; if not, `sudo dnf install gcc`. Setup checks for it before downloading anything. No
+  Python development packages are needed: Setup installs its own Python (3.14) with everything it
+  needs, independent of the system Python.
 - A free [Hugging Face](https://huggingface.co) account, if you need to download the model files.
 
 ## How it works
@@ -80,8 +118,8 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 3. Run the installer with sudo (it writes to `/usr/OFX/Plugins`):
 
    ```
-   tar xzf LTXAlphaGen-0.1.1-rocky9.tar.gz
-   cd LTXAlphaGen-0.1.1
+   tar xzf LTXAlphaGen-0.1.2-rocky9.tar.gz
+   cd LTXAlphaGen-0.1.2
    sudo ./install.sh
    ```
 

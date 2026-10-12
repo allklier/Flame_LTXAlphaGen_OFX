@@ -282,6 +282,12 @@ def _run_once(cmd: list[str], env: dict, label: str, prog: Progress, frac: float
         raise SetupError(f"{label} failed (exit {proc.returncode}): {why}")
 
 
+def find_c_compiler() -> str:
+    """What Triton will use to build its small C helpers at run time ($CC, else gcc, else clang;
+    triton/runtime/build.py:26-30). Empty if there is none."""
+    return os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or ""
+
+
 def install_runtime(man: dict, rt: str, prog: Progress) -> str:
     """Returns the venv python path."""
     env = dict(os.environ, UV_CACHE_DIR=f"{rt}/uv-cache", UV_PYTHON_INSTALL_DIR=f"{rt}/python",
@@ -329,15 +335,22 @@ def install_runtime(man: dict, rt: str, prog: Progress) -> str:
         log.info(f"LTX-2 source {c['commit']} unpacked")
     # Lightricks' repo has no lockfile; ours pins the exact tested environment (manifest note).
     shutil.copyfile(os.path.join(HERE, c["lockfile"]), f"{src}/uv.lock")
-    run([uv, "sync", "--frozen", "--no-dev", "--extra", "natten"], env, "runtime: Python packages",
+    # uv's own Python at the tested version, never a system one: LTX-2 only asks for >= 3.10, so a
+    # system Python 3.12 got used on one user's machine, and its missing headers (no -devel
+    # package) broke Triton's C build at the prompt cache step. uv's Python ships its headers.
+    run([uv, "sync", "--frozen", "--no-dev", "--extra", "natten", "--managed-python",
+         "--python", man["runtime"]["python"]], env, "runtime: Python packages",
         prog, 0.05, cwd=src, retries=2, watch=(f"{rt}/uv-cache", man["runtime"]["uv_cache_bytes"], 0.08))
     py = f"{src}/.venv/bin/python"
     run([uv, "pip", "install", "--python", py, *man["pip_extra"]], env, "runtime: installing OpenColorIO",
         prog, 0.08, retries=2)
     run([py, "-I", "-B", "-c",
-         "import torch, PyOpenColorIO, ltx_pipelines.ic_lora; assert torch.cuda.is_available(), 'no CUDA'; "
-         "print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))"],
-        env, "runtime: checking torch + CUDA", prog, 0.09)
+         "import os, sys, sysconfig, torch, PyOpenColorIO, ltx_pipelines.ic_lora; "
+         "assert torch.cuda.is_available(), 'no CUDA'; "
+         "h = os.path.join(sysconfig.get_paths()['include'], 'Python.h'); "
+         "assert os.path.exists(h), 'no Python headers at ' + h + ' (Triton needs them)'; "
+         "print(sys.version.split()[0], torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))"],
+        env, "runtime: checking Python, torch + CUDA", prog, 0.09)
     return py
 
 
@@ -428,6 +441,11 @@ def main() -> int:
     prog = Progress(ui)
     t0 = time.time()
     try:
+        cc = find_c_compiler()
+        if not cc:  # before any download: the prompt cache step would fail after ~80 GB otherwise
+            raise SetupError("No C compiler found. The GPU code (Triton) compiles small helpers while it "
+                             "runs, so gcc is needed: sudo dnf install gcc. Then press Download again.")
+        log.info(f"C compiler for Triton: {cc}")
         os.makedirs(model_dir, exist_ok=True)
         py = a.ltx_python if a.skip_runtime else install_runtime(man, os.path.join(model_dir, "runtime"), prog)
         summary = gather_models(man, model_dir, a.existing, token, prog)
