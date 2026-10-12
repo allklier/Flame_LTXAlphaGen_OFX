@@ -18,25 +18,25 @@ static int failures = 0;
     }                                                        \
   } while (0)
 
-static void checkClip(int n) {
-  const auto chunks = planChunks(n);
+static void checkClip(int n, int L = kChunkLen, int O = kOverlap, bool smooth = false) {
+  const auto chunks = planChunks(n, L, O);
   CHECK(!chunks.empty(), "n=%d no chunks", n);
   CHECK(chunks.front().start == 0, "n=%d first start %d", n, chunks.front().start);
   CHECK(chunks.back().end() == n - 1, "n=%d last end %d", n, chunks.back().end());
   for (const auto& c : chunks) {
-    CHECK(c.len <= kChunkLen && c.len >= 1, "n=%d bad len %d", n, c.len);
-    if (n > kChunkLen) CHECK(c.len == kChunkLen, "n=%d chunk not full length", n);
+    CHECK(c.len <= L && c.len >= 1, "n=%d bad len %d", n, c.len);
+    if (n > L) CHECK(c.len == L, "n=%d chunk not full length", n);
   }
   for (size_t j = 0; j + 1 < chunks.size(); ++j) {
     const int overlap = chunks[j].end() - chunks[j + 1].start + 1;
     // Rounding of evenly spread starts may cost at most one frame of overlap.
-    CHECK(overlap >= kOverlap - 1, "n=%d overlap %d between %zu and %zu", n, overlap, j, j + 1);
+    CHECK(overlap >= O - 1, "n=%d overlap %d between %zu and %zu", n, overlap, j, j + 1);
     CHECK(chunks[j + 1].start > chunks[j].start, "n=%d starts not increasing", n);
   }
   float prevLastWeight = -1.0f;
   int prevLastChunk = -1;
   for (int i = 0; i < n; ++i) {
-    const auto contrib = frameContributions(chunks, i);
+    const auto contrib = frameContributions(chunks, i, O, smooth);
     CHECK(contrib.size() == 1 || contrib.size() == 2, "n=%d i=%d %zu contributions", n, i,
           contrib.size());
     float sum = 0.0f;
@@ -59,6 +59,26 @@ static void checkClip(int n) {
 
 int main() {
   for (int n = 1; n <= 2000; ++n) checkClip(n);
+  // Chunk Size choices (decision 61) and smoothstep weights (decision 62).
+  for (int s = 0; s < kChunkSizes; ++s) {
+    CHECK((kSizeLen[s] - 1) % 8 == 0, "size %d is not 8n+1", kSizeLen[s]);
+    for (int n = 1; n <= 700; ++n) {
+      checkClip(n, kSizeLen[s], kSizeOverlap[s], false);
+      checkClip(n, kSizeLen[s], kSizeOverlap[s], true);
+    }
+  }
+  {  // smoothstep eases in and out but is symmetric around the middle
+    auto c = planChunks(300);
+    float lin = 0, sm = 0;
+    int a = -1;
+    for (int i = 0; i < 300 && a < 0; ++i)
+      if (frameContributions(c, i).size() == 2) a = i;
+    lin = frameContributions(c, a)[1].weight;
+    sm = frameContributions(c, a, kOverlap, true)[1].weight;
+    CHECK(sm < lin, "smooth weight %f should start lower than linear %f", sm, lin);
+    const float l2 = frameContributions(c, a + 1)[1].weight, s2 = frameContributions(c, a + 1, kOverlap, true)[1].weight;
+    CHECK(l2 > 0 && s2 > 0, "weights positive");
+  }
 
   // Spot checks matching CLAUDE.md.
   {

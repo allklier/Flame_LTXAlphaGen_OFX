@@ -33,7 +33,7 @@ def luma(frames):
 
 
 class JobTest(unittest.TestCase):
-    def run_job(self, root, frames, chunks, contrib, simulate="none"):
+    def run_job(self, root, frames, chunks, contrib, simulate="none", **extra):
         job_id = f"test-{os.getpid()}-{simulate}"
         n = frames.shape[0]
         keys = [f"{simulate[:2]}{i:014x}" for i in range(n)]
@@ -42,7 +42,7 @@ class JobTest(unittest.TestCase):
             "height": frames.shape[1], "frames": n, "chunks": chunks, "frame_keys": keys,
             "contrib": contrib, "cache_root": root,
             "worker": os.path.join(WORKER_DIR, "dummy_worker.py"), "seconds": 0.1,
-            "simulate": simulate, "precision": "bf16", "title": "test",
+            "simulate": simulate, "precision": "bf16", "title": "test", **extra,
         }
         mpath = f"/dev/shm/ltxag_job_{job_id}.json"
         with open(mpath, "w") as f:
@@ -76,6 +76,40 @@ class JobTest(unittest.TestCase):
                     got = np.fromfile(f, dtype="<f2").reshape(5, 7)
                 self.assertEqual(hdr, (transport.OUT_MAGIC, 1, 7, 5, 1, 1))
                 np.testing.assert_allclose(got, want[i], atol=2e-3)
+
+    def read_matte(self, root, key, h, w):
+        with open(cache.matte_path(root, key), "rb") as f:
+            hdr = transport.HEADER.unpack(f.read(transport.HEADER.size))
+            self.assertEqual(hdr[2:5], (w, h, 1))
+            return np.fromfile(f, dtype="<f2").reshape(h, w).astype(np.float32)
+
+    def test_roi_crop_is_pasted_into_black_full_frames(self):
+        rng = np.random.default_rng(1)
+        crop = rng.random((6, 4, 5, 3)).astype(np.float16)  # staged crop: 5x4 at x=3, y=2
+        with tempfile.TemporaryDirectory() as root:
+            rc, keys, status = self.run_job(root, crop, [[0, 6]], [[[0, 1.0]]] * 6,
+                                            full_width=12, full_height=9, roi=[3, 2, 5, 4])
+            self.assertEqual((rc, status["state"]), (0, "done"), status)
+            want = luma(crop)
+            for i, k in enumerate(keys):
+                got = self.read_matte(root, k, 9, 12)
+                np.testing.assert_allclose(got[2:6, 3:8], want[i], atol=2e-3)
+                got[2:6, 3:8] = 0
+                self.assertEqual(float(got.max()), 0.0, "outside the ROI must be black")
+
+    def test_flow_merge_runs_end_to_end(self):
+        # The dummy worker mattes the same frame identically in both chunks, so the flow merge
+        # must reproduce it (the morph itself is covered by test_morph.py).
+        rng = np.random.default_rng(2)
+        frames = rng.random((12, 40, 56, 3)).astype(np.float16)
+        chunks = [[0, 8], [4, 8]]
+        contrib = [[[0, 1.0]]] * 5 + [[[0, 0.75], [1, 0.25]], [[0, 0.25], [1, 0.75]]] + [[[1, 1.0]]] * 5
+        with tempfile.TemporaryDirectory() as root:
+            rc, keys, status = self.run_job(root, frames, chunks, contrib, merge="flow")
+            self.assertEqual((rc, status["state"]), (0, "done"), status)
+            want = luma(frames)
+            for i, k in enumerate(keys):
+                np.testing.assert_allclose(self.read_matte(root, k, 40, 56), want[i], atol=2e-3)
 
     def test_oom_reports_failure_and_cleans_up(self):
         frames = np.zeros((3, 4, 4, 3), np.float16)

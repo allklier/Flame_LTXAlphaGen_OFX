@@ -18,7 +18,8 @@ std::vector<Chunk> planChunks(int n, int L, int O) {
   return chunks;
 }
 
-std::vector<Contribution> frameContributions(const std::vector<Chunk>& chunks, int i, int O) {
+std::vector<Contribution> frameContributions(const std::vector<Chunk>& chunks, int i, int O,
+                                             bool smooth) {
   const int k = static_cast<int>(chunks.size());
   if (k == 0) return {};
   if (k == 1) return {{0, 1.0f}};
@@ -32,7 +33,8 @@ std::vector<Contribution> frameContributions(const std::vector<Chunk>& chunks, i
     const int overlap = a.end() - b.start + 1;
     const double band = double(std::max(1, std::min(O, overlap)));
     const double lo = mid - 0.5 * band;
-    const double w = std::min(1.0, std::max(0.0, (double(i) - lo) / band));
+    double w = std::min(1.0, std::max(0.0, (double(i) - lo) / band));
+    if (smooth) w = w * w * (3.0 - 2.0 * w);
     if (w > 0.0 && w < 1.0) {
       return {{j, float(1.0 - w)}, {j + 1, float(w)}};
     }

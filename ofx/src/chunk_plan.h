@@ -10,6 +10,12 @@ namespace ltxag {
 constexpr int kChunkLen = 145;  // 8*18+1, the model's max frame count
 constexpr int kOverlap = 24;    // minimum overlap / crossfade length (decision 30)
 
+// Chunk Size choices (decision 61): 8n+1 lengths and the overlap that goes with each.
+// Index 0 is Auto in the UI (resolved to one of 1..3 at Process time).
+constexpr int kChunkSizes = 3;
+constexpr int kSizeLen[kChunkSizes] = {145, 73, 33};   // full, half, quarter
+constexpr int kSizeOverlap[kChunkSizes] = {24, 16, 12};
+
 // A chunk covers real (0-based) frames [start, start + len).
 struct Chunk {
   int start;
@@ -29,8 +35,9 @@ struct Contribution {
 
 // Chunks that contribute to frame i, with weights summing to 1. Between
 // neighbouring chunks the switch happens at the middle of their overlap,
-// crossfaded linearly over min(O, overlap) frames. One or two entries.
+// crossfaded over min(O, overlap) frames: linearly, or with smoothstep (decision 62).
+// One or two entries.
 std::vector<Contribution> frameContributions(const std::vector<Chunk>& chunks, int i,
-                                             int O = kOverlap);
+                                             int O = kOverlap, bool smooth = false);
 
 }  // namespace ltxag

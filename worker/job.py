@@ -10,7 +10,10 @@ cache key and crossfade contributions. This process, outside Flame:
   - always cleans up its /dev/shm files and pending markers, and records a final status.
 Manifest fields: job_id node_id input width height frames chunks[[start,len]] frame_keys[]
 contrib[[[chunk,weight],...]] cache_root worker [worker_python] [worker_args[]] seconds simulate
-precision title.
+precision title. ROI (decision 63): width/height are then the CROP staged in `input`, plus
+full_width full_height roi[x0,y0,w,h] (top-down); results are pasted into black full frames.
+Merge (decision 62): merge "smooth" blends overlaps by the weights in contrib; "flow" warps the
+two mattes towards each other first (ltxag_worker/morph.py).
 Status file <cache_root>/jobs/<job_id>.json is rewritten after every chunk (state "running")
 and at the end, so the plugin can follow progress.
 Real worker (manifest has worker_python): talks to the RESIDENT worker server over a Unix socket
@@ -44,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
 
-from ltxag_worker import cache, transport  # noqa: E402
+from ltxag_worker import cache, morph, transport  # noqa: E402
 from ltxag_worker.log import Logger, log_path  # noqa: E402
 
 log = Logger("job")
@@ -445,6 +448,7 @@ def main() -> int:
     job_id, root = m["job_id"], m["cache_root"]
     log.node, log.job = m.get("node_id", "-"), job_id
     keys, contrib, chunks = m["frame_keys"], m["contrib"], m["chunks"]
+    roi, merge = m.get("roi"), m.get("merge", "smooth")
     out_prefix = f"/dev/shm/ltxag_job_{job_id}_out"
     pid_file = f"/dev/shm/ltxag_job_{job_id}.pid"
     with open(pid_file, "w") as f:
@@ -452,7 +456,7 @@ def main() -> int:
     cache.mark_pending(root, keys, os.getpid())
     t_start = time.time()
     log.info(f"start: {m['frames']} frames {m['width']}x{m['height']}, chunks={chunks}, "
-             f"precision={m['precision']} simulate={m['simulate']} sim_seconds={m['seconds']} "
+             f"merge={merge} roi={roi} precision={m['precision']} simulate={m['simulate']} sim_seconds={m['seconds']} "
              f"python={sys.executable} {sys.version.split()[0]} ui={ui}")
     cache.write_status(root, job_id, "running", "", chunks_done=0, chunks=len(chunks),
                        frames_done=0, frames=len(keys))
@@ -496,7 +500,16 @@ def main() -> int:
         parts = contrib[f]
         if f in finished or any(c not in results for c, _ in parts):
             return
-        matte = sum(w * results[c][f - chunks[c][0]].astype(np.float32) for c, w in parts)
+        if merge == "flow" and len(parts) == 2:
+            (ca, _), (cb, wb) = parts
+            matte = morph.morph(results[ca][f - chunks[ca][0]].astype(np.float32),
+                                results[cb][f - chunks[cb][0]].astype(np.float32), wb)
+        else:
+            matte = sum(w * results[c][f - chunks[c][0]].astype(np.float32) for c, w in parts)
+        if roi:
+            full = np.zeros((m["full_height"], m["full_width"]), np.float32)
+            full[roi[1]:roi[1] + roi[3], roi[0]:roi[0] + roi[2]] = matte
+            matte = full
         cache.write_matte(root, keys[f], matte)
         cache.clear_pending(root, [keys[f]])
         finished.add(f)

@@ -10,9 +10,9 @@ endif()
 
 option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence gate" ON)
 # Release version (v0.1 = first release 2026-10-11; 0.1.1 = SETUP REQUIRED on the image output;
-# 0.1.2 = runtime on uv's own pinned Python + C compiler check).
+# 0.1.2 = runtime on uv's own pinned Python + C compiler check; 0.1.3 = Chunk Size, Merge, ROI).
 # Also the OFX plugin version (major.minor) and the release package name.
-set(LTXAG_VERSION "0.1.2")
+set(LTXAG_VERSION "0.1.3")
 string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
 list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
 list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)
@@ -43,7 +43,7 @@ target_include_directories(ofx_support PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Supp
 target_compile_options(ofx_support PRIVATE -w -fvisibility=hidden)
 
 # Pure logic, shared with the unit tests.
-add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp)
+add_library(ltxag_core STATIC ofx/src/chunk_plan.cpp ofx/src/vram_estimate.cpp ofx/src/roi.cpp)
 target_include_directories(ltxag_core PUBLIC ofx/src)
 
 add_library(${BUNDLE_NAME} MODULE
@@ -110,6 +110,10 @@ add_executable(test_cache ofx/tests/test_cache.cpp ofx/src/cache.cpp ofx/src/tra
   ofx/src/user_config.cpp)
 target_include_directories(test_cache PRIVATE ofx/src)
 add_test(NAME cache COMMAND test_cache)
+
+add_executable(test_roi ofx/tests/test_roi.cpp)
+target_link_libraries(test_roi PRIVATE ltxag_core)
+add_test(NAME roi COMMAND test_roi)
 
 add_executable(test_marker_log ofx/tests/test_marker_log.cpp ofx/src/marker.cpp ofx/src/log.cpp
   ofx/src/user_config.cpp)

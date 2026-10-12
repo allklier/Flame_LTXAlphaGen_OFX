@@ -120,7 +120,60 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
 - **24.** Padding to /32 (pixels) and 8n+1 (frames) is automatic and invisible; the output always
   matches the source size and frame count.
 - **26.** No resolution cap and no scaling inside the OFX. VRAM is the only limit.
-- **30.** Chunks of 145 frames, overlap ≥ 24, linear crossfade at the middle of the overlap.
+- **30.** Chunks of 145 frames, overlap ≥ 24, crossfade at the middle of the overlap (decisions
+  61/62 made the size and the blend selectable).
+- **61.** **Chunk Size dropdown: Auto, Full 145, Half 73, Quarter 33** (DECIDED, user 2026-10-12;
+  `kSizeLen`/`kSizeOverlap` in `chunk_plan.h`). All 8n+1 (a quarter of 145 is 36.25, and 37 is not
+  8n+1: 33 is the nearest valid size; a unit test checks it). Overlap goes with the size, 24 / 16 /
+  12 frames, not a separate param. **Auto (the default)** takes the longest size whose
+  `estimateVramNeed` fits free + resident worker − reserve, else the smallest, and Full without
+  NVML (extends decision 34). The size is chosen in `process()` from the crop size (decision 63),
+  and the preflight uses the chosen chunks. Not in the cache key (Process overwrites the whole
+  clip). Trade-off: more seams and less temporal context, so the model may pick another main
+  object per chunk (README warns).
+- **62.** **Merge dropdown: Smooth (default) or Flow Warp** (DECIDED, user 2026-10-12). Smooth =
+  the crossfade weights shaped by smoothstep (`frameContributions(..., smooth)`), computed in
+  C++. Flow Warp = `worker/ltxag_worker/morph.py`, **numpy only** because job.py runs under the
+  system python3 (no OpenCV dependency; none of Setup changes): Horn-Schunck coarse to fine on a
+  copy reduced to ≤ 512 px, one flow each way, then
+  `a_t = a(x + t·F_ba)`, `b_t = b(x + (1−t)·F_ab)`, `out = (1−t)·a_t + t·b_t` (exact at t = 0
+  and 1), clamped to 5% displacement, a plain blend if the mattes differ by < 0.01. Measured on
+  synthetic discs: error 8–10× lower than a dissolve (6–40 px apart), 0.36 s per HD frame, so
+  about 9 s per 24-frame seam against ~4 min of inference per chunk. Applied only on the blended
+  frames, in job.py's `finalize`. It does not fix a switch of the main object. Not in the cache
+  key. Open: an ML morph, or conditioning the next chunk on the previous matte.
+- **63.** **ROI = the picture's own alpha** (DECIDED, user 2026-10-12; `roi.*`, `plugin.cpp`
+  `computeRoi`). **History:** first built as an optional second clip "ROI Matte". That needs the
+  General OFX context; offering Filter too made Flame pick Filter (log `context=2 roi clip
+  absent`), General-only made the plugin load but needed every node re-created (a changed input
+  list invalidates saved nodes), and a second socket plus alpha plus channel choice confused the
+  user. So: **no ROI input, back to the Filter context only.** Re-creating existing nodes is needed
+  once more because the inputs changed again. Behaviour:
+  - **No switch, auto-detected at Process:** if the source's alpha is fully opaque (nothing < 0.99
+    in any frame, or an RGB image) there is no ROI and the whole frame is processed; else the
+    alpha is the matte. Empty matte (nothing above 0.05 anywhere) = an error. A clip that carries
+    an unrelated varying alpha would be cropped: the `ROI` info field ("Crop WxH" or "None (alpha
+    opaque)") and the log (`process: ROI from source alpha …`) show it;
+  - the box is the **union over all frames** of pixels above 0.05 (user: G), grown by **ROI Margin**
+    (default 64, minimum 32), grown again to **at least 512 px per side** (user: F; by enlarging
+    around the centre, not scaling: no resampling, more context), rounded up to a **multiple of
+    32**, slid inside the image;
+  - the plugin crops while staging (the model, the VRAM estimate and `/dev/shm` all see the crop);
+    the manifest carries `width/height` = crop, `full_width/full_height`, `roi`; job.py pastes
+    each blended matte into a black full frame before caching, so the output size is unchanged;
+  - **Black Out Outside ROI** (default off, user: E): the staged source × its alpha, in the
+    source's own colour space (0 stays near black after the OCIO conversion). No dilation: the
+    user dilates upstream. Unverified whether the model likes it: A/B on a test clip;
+  - **Multiply Result by ROI** (default off, user: D): result × the source alpha **at render
+    time** (`applyRoiLimit`), so it toggles without reprocessing;
+  - **cache key:** `|roi=x,y,w,h,k<mask>` for an active ROI, from the hidden `roiState` written at
+    Process (active, box, mask, settings `m<margin>k<mask>`). No ROI: the old key, so earlier
+    caches stay valid. If the ROI settings differ from the stored ones, or nothing was processed
+    and the frame's alpha is a matte, the key is `|roi=unprocessed` (a miss: NOT PROCESSED).
+    Changed alpha *content* is not detected: press Process again (README says so);
+  - Flame may not show OFX param hints (every param has one), so labels say what they do. The
+    alpha reaching the plugin from Flame's picture input is as observed: source is delivered as
+    RGBA (UNVERIFIED: that a matte connected to the node's matte socket arrives in that alpha).
 - **48.** Flame forces an RGBA output; alpha (Flame's matte output) carries the matte or marker.
 - **59.** **SETUP REQUIRED shows on both outputs.** A node viewed on its image output (often
   Flame's default) must not look like a working pass-through before Setup is complete, so the
@@ -134,7 +187,8 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
 
 **UI**
 - **37/52.** Layout follows Flame's observed rules (see "Flame host behaviour"). Tab 1 holds
-  Alpha Gen, Performance and Cache plus three blank spacer columns, so Licence, Models and
+  Alpha Gen, Performance, Chunking, ROI and Cache plus one blank spacer column (6 columns; was
+  three spacers before decisions 61/63), so Licence, Models and
   Support overflow to tab 2, which Flame names "Setup" after the 2nd OFX page.
 - **41.** Plain string fields get a caption label param above them. After a download the token
   caption reads "Token used HH:MM, not stored".
@@ -175,7 +229,9 @@ Flame Python hook: polls refresh markers → steps the current frame and back
 **Source files**
 - `ofx/src/plugin.cpp`: the effect, params, layout, gate, preflight, Process, render, user
   defaults, Collect Logs, the job watcher.
-- `ofx/src/chunk_plan.*`: the chunk planner + crossfade weights.
+- `ofx/src/chunk_plan.*`: the chunk planner + crossfade weights (linear or smoothstep) + the
+  Chunk Size table.
+- `ofx/src/roi.*`: ROI scan, box math and matte rows (pure, tested in `test_roi`).
 - `ofx/src/cache.*`: cache keys, read with mtime refresh, pending markers, purges, the age+LRU
   sweep, and the stale `/dev/shm` sweep.
 - `ofx/src/transport.*`: shm frame files, written with `write()`, never mmap (no SIGBUS inside
@@ -188,10 +244,12 @@ Flame Python hook: polls refresh markers → steps the current frame and back
 - `worker/job.py`: the detached job controller (resident/subprocess channels, progress Tracker,
   VRAM record, refresh marker). Manifest: `job_id node_id input width height frames chunks
   contrib frame_keys cache_root worker [worker_python worker_args worker_socket model_dir unload
-  colour ocio_config seed] seconds simulate precision vram flame_pid title`.
+  colour ocio_config seed] seconds simulate precision vram flame_pid title` plus, since decisions
+  62/63, `merge` ("smooth"|"flow"), `full_width full_height` and `roi` [x,y,w,h] (with an ROI,
+  `width/height` are the crop).
 - `worker/ltx_worker.py`: the real worker (see "Worker"). `worker/dummy_worker.py`: a luminance
   "matte" with `--simulate oom|crash|hang`, same line protocol.
-- `worker/ltxag_worker/{padding,transport,cache,log,colour}.py`.
+- `worker/ltxag_worker/{padding,transport,cache,log,colour,morph}.py`.
 - `helper/setup_helper.py` (Setup), `helper/model_manifest.json`, `helper/ltx2-uv.lock`,
   `helper/licence.txt` (full LTX-2.x licence + header).
 - `flame_hook/ltx_alphagen_hook.py`: the Flame Python hook (decision 49), copied into the
@@ -204,7 +262,7 @@ Flame Python hook: polls refresh markers → steps the current frame and back
   nvidia-smi).
 - `third_party/openfx`: OpenFX `OFX_Release_1_4_TAG`, `include/` + `Support/` only (BSD,
   `VENDORED.txt`).
-- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.2; the OFX
+- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.3; the OFX
   version is its major.minor), grouping "LTX". `LTXAG_DEV_BUILD=ON` (the CMake default, for local
   tests) adds a Prototype page: Sim Seconds, Simulate, Sim VRAM GB, Worker Python, Enforce Gate,
   Auto Refresh, Use Dummy. Release builds (`OFF`) hide those params but still define them, so
@@ -456,8 +514,10 @@ process per run incl. model load, Gemma loaded and freed in process):
   - `posix_spawn` needs absolute paths;
   - workers run as `python -I -B`, so dependencies must be in the interpreter's own site-packages;
   - `-DLTXAG_GIT=<hash>` sets the build hash when building from a copy without `.git`.
-- **Tests (ctest, 7):** `chunk_plan`, `worker_python` (padding, transport, job incl. the progress
-  Tracker, the VRAM CSV and the refresh marker, the Flame hook against a fake `flame` module, log),
+- **Tests (ctest, 8):** `chunk_plan` (all sizes, linear and smooth), `roi` (box math and channel
+  choice), `worker_python` (padding, transport, job incl. the progress Tracker, the VRAM CSV and
+  the refresh marker, the ROI paste-back and flow-merge paths, `test_morph`, the Flame hook against
+  a fake `flame` module, log),
   `worker_roundtrip`, `cache`, `marker_log` (marker, overlay, log format), `vram_estimate` (every
   measurement covered), `load_bundle`. Against the real model on a GPU machine:
   `tools/worker_smoke.py`, `job_real_smoke.py`, `resident_smoke.py`, `setup_smoke.sh`. All are
@@ -471,10 +531,10 @@ process per run incl. model load, Gemma loaded and freed in process):
 
 - **6K:** try the conv VAE / DiffVAE modes / `--tile`.
 - Large jobs: disk staging when `/dev/shm` is too small; skip already-cached chunks.
-- **Chunk length for 48 GB cards (PROPOSED, 2026-10-12):** chunks are fixed at 145 frames, so on
-  a 48 GB card (e.g. RTX 6000 Ada) HD fp8 needs ~42 GB of ~45 GB free and only just fits next to
-  Flame; Unload off (~58 GB) can't. Offer a Chunk Length (or pick the longest that fits): ~35 GB
-  at 97 frames, ~28 GB at 49, at the cost of more crossfade seams. Ada itself is supported by
+- **Chunk length for 48 GB cards: built as decision 61 (v0.2, not yet tested in Flame).** On a 48
+  GB card (e.g. RTX 6000 Ada) HD fp8 needs ~42 GB of ~45 GB free at 145 frames; Half/Quarter
+  should fit (the estimate gives the numbers; `vram_stats.csv` from that friend would confirm).
+  Ada itself is supported by
   fp8-cast (the Triton upcast needs sm_89+, `ltx_core/quantization/fp8_cast.py:62-95`);
   speed and natten kernels on Ada are UNVERIFIED.
 - Background Reactor check (`hostIsBackground`, cached mattes).

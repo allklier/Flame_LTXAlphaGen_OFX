@@ -41,7 +41,10 @@ memory reducing runtime considerably. This needs more VRAM: on a 48 GB card, lea
 11. Click the 'Process' button to run the model. It will show a progress bar and time
 estimate. Once the processing is complete it will automatically update the viewer. 
 The image output will show an overlay, and the matte output will have the matte.
-12. The output is cached locally to avoid re-running the model. If you're done you 
+12. Optional: for a clip with several subjects, put a matte of the one you want in the picture's
+alpha (see 'ROI'), so the model only looks at that region. On a smaller GPU, or for very long
+clips, see 'Chunking'.
+13. The output is cached locally to avoid re-running the model. If you're done you 
 may want to use the 'Purge Cache' button to purge those files. 
 
 ## Origins
@@ -97,9 +100,14 @@ Batch Render are instant.
 - The matte is delivered in the **alpha / matte output** of the node. The **image output** shows
   the source with the matte overlaid in magenta (30%), so you can judge the matte against the
   picture at a glance.
-- Clips are processed in chunks of 145 frames with a crossfade across the overlap. Padding to the
-  model's size and frame rules is automatic, and the output always matches the source size and
-  frame count.
+- Clips are processed in chunks (up to 145 frames; see **Chunk Size**) that overlap and are
+  joined across the overlap (see **Merge**). Padding to the model's size and frame rules is
+  automatic, and the output always matches the source size and frame count.
+- **Watch the main object between chunks.** The model has no idea what you want matted: it picks
+  the most prominent element of each chunk by itself. In a long clip, or with small chunks, a
+  different object can become the most prominent in the next chunk, and the matte then switches
+  subject at the seam. Merging cannot repair that. If it happens, use a larger Chunk Size, or give
+  the model a region of interest (the picture's alpha, see **ROI**) so it only sees your subject.
 - The model sees display-referred images. Camera log and ACEScg footage is converted for the
   model with OCIO (see **Input Colour**); your source and output are not changed.
 - Mattes are cached per source frame and settings. Changing Input Colour or Precision gives a
@@ -118,8 +126,8 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 3. Run the installer with sudo (it writes to `/usr/OFX/Plugins`):
 
    ```
-   tar xzf LTXAlphaGen-0.1.2-rocky9.tar.gz
-   cd LTXAlphaGen-0.1.2
+   tar xzf LTXAlphaGen-0.1.3-rocky9.tar.gz
+   cd LTXAlphaGen-0.1.3
    sudo ./install.sh
    ```
 
@@ -230,7 +238,8 @@ not affected.
 
 ## Controls
 
-The node has two tabs: the first holds **Alpha Gen**, **Performance** and **Cache**; the
+The node has two tabs: the first holds **Alpha Gen**, **Performance**, **Chunking**, **ROI** and
+**Cache**; the
 **Setup** tab holds **Licence**, **Models** and **Support**. Settings marked *per user* are
 shared by all your nodes and projects; the others are saved with each node.
 
@@ -268,6 +277,44 @@ shared by all your nodes and projects; the others are saved with each node.
 - **Save Default** (*per user*): makes this node's Precision, Unload GPU and VRAM Reserve the
   defaults for every new node. Order of precedence: built-in default, then your saved default,
   then the node's own setting.
+
+### Chunking
+
+- **Chunk Size**: how many frames the model processes at once. `Auto` (default) takes the longest
+  size that fits the free GPU memory (after the VRAM Reserve). `Full (145)`, `Half (73)` and
+  `Quarter (33)` are fixed sizes (all of the form 8n+1, which the model needs); smaller ones need
+  less GPU memory, which helps smaller cards, but add seams and give the model less context.
+  The chunks overlap by 24, 16 and 12 frames respectively. Clips shorter than the chunk size are
+  one chunk.
+- **Merge**: how neighbouring chunks are joined across their overlap.
+  - `Smooth` (default): an eased dissolve from one chunk's matte to the next.
+  - `Flow Warp`: the two chunks' mattes are first warped towards each other with optical flow,
+    so an edge that the chunks disagree on moves from one position to the other instead of
+    showing a ghost. It takes a few seconds per seam, small next to the model time. It does not
+    fix a switch of the main object (see How it works).
+
+### ROI (Alpha)
+
+Optional. Put your subject's matte in the **alpha channel of the picture** that goes into the
+node (it does not need to be exact; a loose garbage matte is fine) to tell the model where to look.
+There is no separate input and no switch: if the alpha is fully opaque in every frame, there is
+no ROI and the whole frame is processed. If the alpha is a matte, the plugin takes its bounding
+box over the **whole clip**, adds a margin, and shows the model only that crop. The result is
+placed back into a black full-size frame, so the output always matches the source. Besides
+steering the model, a small crop needs far less GPU memory and time. The first field of the
+column shows what the last Process did (`Crop 800x1056` or `None (alpha opaque)`).
+
+- **ROI Margin (px)**: pixels of context around the matte's box (default 64, at least 32), so the
+  model can find fine edges the matte missed. The crop is also at least 512 pixels per side, and
+  its sides are multiples of 32.
+- **Black Out Outside ROI** (off by default): black out everything outside the alpha matte before
+  the model sees it. A stronger cue than the crop alone; dilate the matte upstream if it is tight.
+- **Multiply Result by ROI** (off by default): multiply the result by the alpha matte. Applied
+  when viewing, so you can toggle it without reprocessing.
+
+The alpha is read when you press **Process**. If you change the matte, ROI Margin or Black Out
+Outside ROI, press Process again (the marker shows until then). Mattes made with an ROI are cached
+separately from those without.
 
 ### Cache
 
@@ -331,7 +378,9 @@ This is not legal advice, and the licensing notes will be reviewed before a publ
 install, Hugging Face download, reuse of existing model files, checksum verification); input
 colour conversion; bf16 and fp8; a resident model with Unload GPU; a clip-size-aware memory check
 with a warning; a progress window with time left; automatic viewer refresh; the disk matte cache;
-chunking for long clips; logging and Collect Logs.
+chunking for long clips with selectable chunk size (including Auto for smaller GPUs) and merge
+mode (Smooth or optical-flow Flow Warp); a region of interest taken from the picture's alpha;
+logging and Collect Logs.
 
 ### On the roadmap
 
@@ -341,7 +390,6 @@ chunking for long clips; logging and Collect Logs.
 - Processing only the frames that are not cached yet. Process always processes the whole clip.
 - Background Reactor rendering is untested (Batch Render works).
 - An offline install of the Python packages for workstations without internet.
-- Support half-chunk rendering for low VRAM GPUs
 - Native metal implementation on MacOS
 
 ## Support and logs

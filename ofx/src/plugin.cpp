@@ -42,6 +42,7 @@
 #include "nvml.h"
 #include "ofxsImageEffect.h"
 #include "process.h"
+#include "roi.h"
 #include "transport.h"
 #include "user_config.h"
 #include "vram_estimate.h"
@@ -70,6 +71,10 @@ constexpr int kDefaultCheckW = 1920, kDefaultCheckH = 1080, kDefaultCheckFrames 
 const char* const kColourSpaces[] = {"Bypass", "ACEScg", "LogC4", "Log3G10", "LogC3", "BMD Film Gen5"};
 const char* const kPrecisions[] = {"bf16", "fp8"};
 const char* const kSimulations[] = {"none", "oom", "crash", "hang"};
+// Chunk Size (decision 61): index 0 is Auto, then chunk_plan.h kSizeLen. Setups store the index.
+const char* const kChunkSizeNames[] = {"Auto", "Full (145)", "Half (73)", "Quarter (33)"};
+// Merge (decision 62): how overlapping chunks are joined.
+const char* const kMergeNames[] = {"Smooth", "Flow Warp"};
 
 // Params. Column (group) in brackets; see CLAUDE.md "Revised layout".
 // [Alpha Gen]
@@ -94,6 +99,14 @@ constexpr const char* kPExistingDir = "existingModels";
 constexpr const char* kPSetupStatus = "setupStatus";
 constexpr const char* kPDebugLog = "debugLogging";
 constexpr const char* kPCollectLogs = "collectLogs";
+// [Chunking]
+constexpr const char* kPChunkSize = "chunkSize";
+constexpr const char* kPMerge = "mergeMode";
+// [ROI]
+constexpr const char* kPRoiMargin = "roiMargin";
+constexpr const char* kPRoiMask = "roiMaskOutside";
+constexpr const char* kPRoiLimit = "roiLimit";
+constexpr const char* kPRoiInfo = "roiInfo";
 // [Cache] — per user, except Purge Cache (this node).
 constexpr const char* kPCacheDir = "cacheDir";
 constexpr const char* kPCacheInfo = "cacheInfo";
@@ -111,6 +124,7 @@ constexpr const char* kPUseDummy = "useDummy";
 constexpr const char* kPInitialized = "initialized";
 constexpr const char* kPNodeId = "nodeId";
 constexpr const char* kPRefreshTick = "refreshTick";
+constexpr const char* kPRoiState = "roiState";
 
 constexpr const char* kTokenCaptionDefault = "Hugging Face token:";
 
@@ -273,6 +287,59 @@ HostInfo hostInfo() {
   return h;
 }
 
+// What the last Process decided about the ROI, saved with the setup (hidden param roiState).
+// Render needs it for the cache key without scanning the clip (decision 63).
+struct RoiState {
+  bool valid = false;    // a state exists and matches the current ROI settings
+  bool active = false;   // the source alpha was a matte: the model saw `box` only
+  RoiBox box{0, 0, 0, 0};
+  bool mask = false;     // Black Out Outside ROI was on
+  std::string settings;  // roiSettings() at that time; a mismatch means "reprocess"
+};
+
+std::string formatRoiState(const RoiState& r) {
+  char b[160];
+  std::snprintf(b, sizeof b, "%d,%d,%d,%d,%d,%d;%s", int(r.active), r.box.x, r.box.y, r.box.w,
+                r.box.h, int(r.mask), r.settings.c_str());
+  return b;
+}
+
+RoiState parseRoiState(const std::string& v) {
+  RoiState r;
+  int a = 0, k = 0;
+  char set[64] = {0};
+  if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d;%63s", &a, &r.box.x, &r.box.y, &r.box.w, &r.box.h,
+                  &k, set) == 7) {
+    r.valid = true;
+    r.active = a != 0;
+    r.mask = k != 0;
+    r.settings = set;
+  }
+  return r;
+}
+
+// True if the image has an alpha channel with any value below 0.99 (a matte, not just opaque).
+bool alphaVaries(const OFX::Image& img) {
+  if (img.getPixelComponents() != OFX::ePixelComponentRGBA ||
+      img.getPixelDepth() != OFX::eBitDepthFloat)
+    return false;
+  const OfxRectI b = img.getBounds();
+  for (int y = b.y1; y < b.y2; ++y) {
+    const auto* p = static_cast<const float*>(img.getPixelAddress(b.x1, y));
+    for (int x = 0; x < b.x2 - b.x1; ++x)
+      if (p[size_t(x) * 4 + 3] < 0.99f) return true;
+  }
+  return false;
+}
+
+int componentsOf(const OFX::Image& img) {
+  switch (img.getPixelComponents()) {
+    case OFX::ePixelComponentRGBA: return 4;
+    case OFX::ePixelComponentRGB: return 3;
+    default: return 1;
+  }
+}
+
 std::atomic<unsigned> gJobSeq{0};
 
 class AlphaGenEffect : public OFX::ImageEffect {
@@ -280,6 +347,13 @@ class AlphaGenEffect : public OFX::ImageEffect {
   explicit AlphaGenEffect(OfxImageEffectHandle handle) : ImageEffect(handle) {
     src_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
+    chunkSize_ = fetchChoiceParam(kPChunkSize);
+    merge_ = fetchChoiceParam(kPMerge);
+    roiMargin_ = fetchIntParam(kPRoiMargin);
+    roiMask_ = fetchBooleanParam(kPRoiMask);
+    roiLimit_ = fetchBooleanParam(kPRoiLimit);
+    roiState_ = fetchStringParam(kPRoiState);
+    roiInfo_ = fetchStringParam(kPRoiInfo);
     colour_ = fetchChoiceParam(kPColour);
     status_ = fetchStringParam(kPStatus);
     showMarker_ = fetchBooleanParam(kPShowMarker);
@@ -315,7 +389,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
       LogScope scope(nodeId_);
       bool init = false;
       initialized_->getValue(init);
-      LOGI("createInstance %p: initialized=%d", static_cast<void*>(this), int(init));
+      LOGI("createInstance %p: initialized=%d context=%d", static_cast<void*>(this), int(init),
+           int(getContext()));
       if (!init) {
         // New node (decision 21): take the current user defaults; a node loaded from a
         // saved setup keeps its own values because it carries initialized=true.
@@ -406,11 +481,12 @@ class AlphaGenEffect : public OFX::ImageEffect {
       } else {
         sb = src->getBounds();
         const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
-        const std::string key = matteKey(hashImage(*src), paramSignature());
+        const std::string key = matteKey(hashImage(*src), paramSignature(nullptr, src.get()));
         std::vector<uint16_t> half;
         if (readMatte(cacheRoot(), key, w, h, half)) {
           matte.resize(half.size());
           halfToFloat(half.data(), matte.data(), matte.size());
+          applyRoiLimit(*src, matte, w, h);
         } else if (isPending(cacheRoot(), key)) {
           message = "Processing: this frame is not ready yet.";
           caption = "PROCESSING";
@@ -492,6 +568,77 @@ class AlphaGenEffect : public OFX::ImageEffect {
   }
 
  private:
+  // Multiply Result by ROI (decision 63): the cached matte times this frame's source alpha.
+  // Render-time only, so it can be toggled without reprocessing.
+  void applyRoiLimit(const OFX::Image& src, std::vector<float>& matte, int w, int h) {
+    bool limit = false;
+    roiLimit_->getValue(limit);
+    if (!limit) return;
+    const RoiState st = currentRoiState();
+    if (!st.valid || !st.active) return;
+    const OfxRectI b = src.getBounds();
+    const int comps = componentsOf(src);
+    std::vector<float> row(w);
+    for (int r = 0; r < h; ++r) {
+      roiRowAlpha(static_cast<const float*>(src.getPixelAddress(b.x1, b.y2 - 1 - r)), comps, w, row.data());
+      float* m = matte.data() + size_t(r) * w;
+      for (int x = 0; x < w; ++x) m[x] *= row[x];
+    }
+  }
+
+  // Scans the source's alpha over the whole clip (main thread, like the staging fetch). If the
+  // alpha is opaque in every frame there is no ROI and the model sees the whole frame; else the
+  // crop box is the union of the matte, grown by the margin (roi.h).
+  bool computeRoi(int first, int n, int W, int H, RoiState& out, std::string& err) {
+    int margin = 64;
+    roiMargin_->getValue(margin);
+    roiMask_->getValue(out.mask);
+    out.settings = roiSettings();
+    out.valid = true;
+    out.box = {0, 0, W, H};
+    RoiScan scan;
+    for (int f = 0; f < n; ++f) {
+      std::unique_ptr<OFX::Image> img;
+      try {
+        img.reset(src_->fetchImage(double(first + f)));
+      } catch (const std::exception& e) {
+        LOGE("process: fetchImage(%d) threw: %s", first + f, e.what());
+      }
+      if (!img) {
+        err = "Flame did not provide source frame " + std::to_string(first + f) + ".";
+        return false;
+      }
+      if (img->getPixelDepth() != OFX::eBitDepthFloat) {
+        err = "Only 32-bit float images are supported.";
+        return false;
+      }
+      const OfxRectI b = img->getBounds();
+      if (b.x2 - b.x1 != W || b.y2 - b.y1 != H) {
+        err = "Source frames differ in size within the clip.";
+        return false;
+      }
+      const int comps = componentsOf(*img);
+      for (int row = 0; row < H; ++row)
+        scan.addRow(static_cast<const float*>(img->getPixelAddress(b.x1, b.y2 - 1 - row)), comps, W, row);
+    }
+    if (!scan.alphaVaries) {
+      LOGI("process: source alpha is opaque in all %d frames: no ROI, whole frame", n);
+      return true;
+    }
+    if (!scan.alpha.any()) {
+      err = std::string("The source alpha is empty (nothing above ") +
+            std::to_string(kRoiThreshold).substr(0, 4) + " in any frame), so there is no ROI.";
+      return false;
+    }
+    out.active = true;
+    out.box = expandRoi(scan.alpha, margin, W, H);
+    LOGI("process: ROI from source alpha: bounds x %d-%d y %d-%d (union of %d frames), margin %d -> crop "
+         "x %d y %d %dx%d of %dx%d, black out outside %d",
+         scan.alpha.x0, scan.alpha.x1, scan.alpha.y0, scan.alpha.y1, n, margin, out.box.x,
+         out.box.y, out.box.w, out.box.h, W, H, int(out.mask));
+    return true;
+  }
+
   void handleParam(const std::string& name, double time) {
     if (name == kPProcess) {
       process(time);
@@ -563,7 +710,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const SetupState st = setupState();
     const bool closed = gateClosed();
     for (const char* p : {kPColour, kPProcess, kPShowMarker, kPPurgeNode, kPPrecision, kPUnload,
-                          kPHeadroom, kPSaveDefault}) {
+                          kPHeadroom, kPSaveDefault, kPChunkSize, kPMerge,
+                          kPRoiMargin, kPRoiMask, kPRoiLimit}) {
       try {
         getParam(p)->setEnabled(!closed);
       } catch (const std::exception& e) {
@@ -600,12 +748,45 @@ class AlphaGenEffect : public OFX::ImageEffect {
     return dummy;
   }
 
-  std::string paramSignature() {
+  // Decision 63: the ROI box and Black Out Outside ROI change the matte, so they are part of the
+  // key (two nodes on one source with different ROIs must not share mattes). Without an ROI (an
+  // opaque alpha) the key is the old one, so earlier caches stay valid. Chunk Size and Merge are
+  // not in it: Process overwrites the whole clip anyway. With no saved state that matches the
+  // current ROI settings, a frame whose alpha is a matte gets "roi=unprocessed" (never a hit).
+  // `img` is the frame being keyed; the state is decided by the last Process.
+  std::string paramSignature(const RoiState* roiOverride = nullptr, const OFX::Image* img = nullptr) {
     int colour = 0, prec = 0;
     colour_->getValue(colour);
     precision_->getValue(prec);
-    return std::string("v1|cs=") + kColourSpaces[colour] + "|prec=" + kPrecisions[prec] +
-           "|model=" + (useDummy() ? kDummyVersion : kModelVersion);
+    std::string sig = std::string("v1|cs=") + kColourSpaces[colour] + "|prec=" + kPrecisions[prec] +
+                      "|model=" + (useDummy() ? kDummyVersion : kModelVersion);
+    const RoiState st = roiOverride ? *roiOverride : currentRoiState();
+    if (st.valid) {
+      if (st.active)
+        sig += "|roi=" + std::to_string(st.box.x) + "," + std::to_string(st.box.y) + "," +
+               std::to_string(st.box.w) + "," + std::to_string(st.box.h) + ",k" +
+               std::to_string(int(st.mask));
+    } else if (img && alphaVaries(*img)) {
+      sig += "|roi=unprocessed";
+    }
+    return sig;
+  }
+
+  std::string roiSettings() {
+    int margin = 64;
+    bool mask = false;
+    roiMargin_->getValue(margin);
+    roiMask_->getValue(mask);
+    return "m" + std::to_string(margin) + "k" + std::to_string(int(mask));
+  }
+
+  // The saved ROI state, valid only while the ROI settings still match the ones it was made with.
+  RoiState currentRoiState() {
+    std::string v;
+    roiState_->getValue(v);
+    RoiState st = parseRoiState(v);
+    if (st.valid && st.settings != roiSettings()) st.valid = false;
+    return st;
   }
 
   std::string lastJobStatus() {
@@ -637,7 +818,32 @@ class AlphaGenEffect : public OFX::ImageEffect {
   // Decision 56 (user, 2026-10-11): too little memory is a warning with Yes/No, not a refusal,
   // because the estimate rests on few measurements. The numbers go into the manifest so job.py
   // can log estimate vs actual (logs/vram_stats.csv).
-  bool preflight(double time, const std::vector<Chunk>& chunks, std::string& vramJson) {
+  // GPU memory held by a live resident worker (counts as available whatever its precision).
+  double residentWorkerGB(unsigned& pid) {
+    pid = 0;
+    const std::string info = readFile(workerSocket() + ".json");
+    if (info.empty() || !pidAlive(std::atoi(jsonField(info, "pid").c_str()))) return 0.0;
+    pid = unsigned(std::atoi(jsonField(info, "pid").c_str()));
+    return std::atof(jsonField(info, "vram_gb").c_str());
+  }
+
+  // Decision 61: Auto takes the longest chunk size whose estimated need fits the available
+  // memory, else the smallest. Without NVML it takes Full. The overlap goes with the size.
+  int chooseChunkSize(int mode, bool fp8, int w, int h, int frames, bool resident, double head) {
+    if (mode > 0) return mode - 1;
+    const VramInfo v = queryVram();
+    if (!v.ok) return 0;
+    unsigned pid = 0;
+    const double available = v.freeGB + residentWorkerGB(pid) - head;
+    for (int s = 0; s < kChunkSizes; ++s) {
+      const double need = estimateVramNeed(fp8, w, h, std::min(kSizeLen[s], frames), resident).gb;
+      LOGI("chunk size auto: %d frames/chunk needs %.1f GB, available %.1f GB", kSizeLen[s], need, available);
+      if (need <= available) return s;
+    }
+    return kChunkSizes - 1;
+  }
+
+  bool preflight(const std::vector<Chunk>& chunks, int w, int h, std::string& vramJson) {
     int prec = 0;
     double head = 0.0, simNeed = 0.0;
     bool unload = true;
@@ -645,20 +851,13 @@ class AlphaGenEffect : public OFX::ImageEffect {
     headroom_->getValue(head);
     unload_->getValue(unload);
     simNeed_->getValue(simNeed);
-    const OfxRectD rod = src_->getRegionOfDefinition(time);
-    const int w = int(std::lround(rod.x2 - rod.x1)), h = int(std::lround(rod.y2 - rod.y1));
     int longest = 0;
     for (const auto& c : chunks) longest = std::max(longest, c.len);
     const VramNeed est = estimateVramNeed(prec == 1, w, h, longest, !unload);
     const double need = simNeed > 0.0 ? simNeed : est.gb;
     const VramInfo v = queryVram();
-    double reusable = 0.0;
     unsigned workerPid = 0;
-    const std::string info = readFile(workerSocket() + ".json");
-    if (!info.empty() && pidAlive(std::atoi(jsonField(info, "pid").c_str()))) {
-      workerPid = unsigned(std::atoi(jsonField(info, "pid").c_str()));
-      reusable = std::atof(jsonField(info, "vram_gb").c_str());
-    }
+    const double reusable = residentWorkerGB(workerPid);
     const double available = v.freeGB + reusable - head;
     LOGI("preflight: %s %dx%d longest chunk %d -> model %dx%dx%d, need %.1f GB%s; free %.1f + resident "
          "%.1f - reserve %.1f = %.1f GB available (nvml %s)",
@@ -734,10 +933,30 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const OfxRangeD r = src_->getFrameRange();
     const int first = int(std::lround(r.min));
     const int n = int(std::lround(r.max)) - first + 1;
-    const auto chunks = planChunks(n);
+    const OfxRectD rod = src_->getRegionOfDefinition(time);
+    const int fullW = int(std::lround(rod.x2 - rod.x1)), fullH = int(std::lround(rod.y2 - rod.y1));
+
+    // Decision 63: the crop. Without an alpha matte the box is the whole frame.
+    RoiState roi;
+    std::string err;
+    if (!computeRoi(first, n, fullW, fullH, roi, err)) return error(err);
+    const bool useRoi = roi.active;
+    int prec = 0, chunkMode = 0, mergeMode = 0;
+    bool unload = true;
+    double head = 0.0;
+    precision_->getValue(prec);
+    unload_->getValue(unload);
+    headroom_->getValue(head);
+    chunkSize_->getValue(chunkMode);
+    merge_->getValue(mergeMode);
+    const int sizeIdx = chooseChunkSize(chunkMode, prec == 1, roi.box.w, roi.box.h, n, !unload, head);
+    const int chunkLen = kSizeLen[sizeIdx], overlap = kSizeOverlap[sizeIdx];
+    const auto chunks = planChunks(n, chunkLen, overlap);
+    LOGI("process: chunk size %s -> %d frames, overlap %d; merge %s", kChunkSizeNames[chunkMode],
+         chunkLen, overlap, kMergeNames[mergeMode]);
     std::string vramJson;
-    if (!preflight(time, chunks, vramJson)) return;
-    const std::string sig = paramSignature();
+    if (!preflight(chunks, roi.box.w, roi.box.h, vramJson)) return;
+    const std::string sig = paramSignature(&roi);
     const std::string root = cacheRoot();
     const std::string jobId = std::to_string(getpid()) + "-" + std::to_string(gJobSeq++) + "-" +
                               std::to_string(std::time(nullptr));
@@ -748,9 +967,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
 
     std::vector<std::string> keys(n);
     int w = 0, h = 0;
+    const int cw = roi.box.w, ch = roi.box.h;  // what the model sees
     FrameWriter writer;
-    std::string err;
-    std::vector<float> rgb;
+    std::vector<float> rgb, maskRow;
     std::vector<uint16_t> frame;
     const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
@@ -772,23 +991,36 @@ class AlphaGenEffect : public OFX::ImageEffect {
              int(img->getPixelDepth()));
         if (img->getPixelDepth() != OFX::eBitDepthFloat)
           return error("Only 32-bit float images are supported.");
-        if (!writer.open(input, w, h, n, err)) {
+        if (w != fullW || h != fullH)
+          return error("Source frame size differs from the clip's region of definition.");
+        if (!writer.open(input, cw, ch, n, err)) {
           unlink(input.c_str());
           return error(err);
         }
-        rgb.resize(size_t(w) * 3);
-        frame.resize(size_t(w) * h * 3);
+        rgb.resize(size_t(cw) * 3);
+        maskRow.resize(size_t(w));
+        frame.resize(size_t(cw) * ch * 3);
       } else if (b.x2 - b.x1 != w || b.y2 - b.y1 != h) {
         writer.close();
         unlink(input.c_str());
         return error("Source frames differ in size within the clip.");
       }
       const int sc = img->getPixelComponents() == OFX::ePixelComponentRGBA ? 4 : 3;
-      for (int row = 0; row < h; ++row) {
-        const auto* p = static_cast<const float*>(img->getPixelAddress(b.x1, b.y2 - 1 - row));
-        for (int x = 0; x < w; ++x)
+      // Black Out Outside ROI: the source times its own alpha matte, in the source's colour space
+      // (black stays near black after the colour conversion).
+      const bool blackOut = useRoi && roi.mask;
+      for (int row = 0; row < ch; ++row) {
+        const int srcRow = roi.box.y + row;
+        const auto* p = static_cast<const float*>(img->getPixelAddress(b.x1 + roi.box.x, b.y2 - 1 - srcRow));
+        for (int x = 0; x < cw; ++x)
           for (int k = 0; k < 3; ++k) rgb[size_t(x) * 3 + k] = p[size_t(x) * sc + k];
-        floatToHalf(rgb.data(), frame.data() + size_t(row) * w * 3, rgb.size());
+        if (blackOut) {
+          roiRowAlpha(static_cast<const float*>(img->getPixelAddress(b.x1, b.y2 - 1 - srcRow)), sc, w,
+                      maskRow.data());
+          for (int x = 0; x < cw; ++x)
+            for (int k = 0; k < 3; ++k) rgb[size_t(x) * 3 + k] *= maskRow[size_t(roi.box.x + x)];
+        }
+        floatToHalf(rgb.data(), frame.data() + size_t(row) * cw * 3, rgb.size());
       }
       keys[f] = matteKey(hashImage(*img), sig);
       if (!writer.writeFrame(frame.data(), err)) {
@@ -801,16 +1033,19 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const double sec =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     LOGI("process: staged %d frames in %.2f s (%.1f ms/frame), %.1f MB in %s", n, sec,
-         1000.0 * sec / n, double(n) * w * h * 6 / 1048576.0, input.c_str());
+         1000.0 * sec / n, double(n) * cw * ch * 6 / 1048576.0, input.c_str());
 
     double seconds = 10.0;
-    int sim = 0, prec = 0;
+    int sim = 0;
     simSeconds_->getValue(seconds);
     simulate_->getValue(sim);
-    precision_->getValue(prec);
     std::ostringstream js;
     js << "{\"job_id\":" << jsonStr(jobId) << ",\"node_id\":" << jsonStr(nodeId_)
-       << ",\"input\":" << jsonStr(input) << ",\"width\":" << w << ",\"height\":" << h
+       << ",\"input\":" << jsonStr(input) << ",\"width\":" << cw << ",\"height\":" << ch
+       << ",\"full_width\":" << w << ",\"full_height\":" << h;
+    if (useRoi)
+      js << ",\"roi\":[" << roi.box.x << "," << roi.box.y << "," << roi.box.w << "," << roi.box.h << "]";
+    js << ",\"merge\":" << (mergeMode == 1 ? "\"flow\"" : "\"smooth\"")
        << ",\"frames\":" << n << ",\"chunks\":[";
     for (size_t c = 0; c < chunks.size(); ++c)
       js << (c ? "," : "") << "[" << chunks[c].start << "," << chunks[c].len << "]";
@@ -819,7 +1054,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     js << "],\"contrib\":[";
     for (int f = 0; f < n; ++f) {
       js << (f ? "," : "") << "[";
-      const auto contrib = frameContributions(chunks, f);
+      const auto contrib = frameContributions(chunks, f, overlap, mergeMode == 0);
       for (size_t c = 0; c < contrib.size(); ++c)
         js << (c ? "," : "") << "[" << contrib[c].chunk << "," << contrib[c].weight << "]";
       js << "]";
@@ -828,8 +1063,6 @@ class AlphaGenEffect : public OFX::ImageEffect {
        << ",\"worker\":"
        << jsonStr(resourcesDir() + (useDummy() ? "/worker/dummy_worker.py" : "/worker/ltx_worker.py"));
     if (!useDummy()) {
-      bool unload = true;
-      unload_->getValue(unload);
       int colour = 0;
       colour_->getValue(colour);
       js << ",\"worker_python\":" << jsonStr(ltxPython) << ",\"worker_args\":[\"--model-dir\","
@@ -851,6 +1084,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const std::string level = logLevel() == LogLevel::Debug ? "debug" : "info";
     // Before the launch: the render Flame triggers right after this button press must already
     // see PROCESSING (test 2: it raced job.py's own markers and showed NOT PROCESSED).
+    setIfChanged(roiState_, formatRoiState(roi));  // render keys on it from now on
+    setIfChanged(roiInfo_, useRoi ? "Crop " + std::to_string(roi.box.w) + "x" + std::to_string(roi.box.h)
+                                  : std::string("None (alpha opaque)"));
     markPending(root, keys, getpid());
     const bool ok = launchDetached(
         {pythonPath(), "-I", "-B", resourcesDir() + "/worker/job.py", manifest},
@@ -1039,6 +1275,13 @@ class AlphaGenEffect : public OFX::ImageEffect {
 
   OFX::Clip* src_;
   OFX::Clip* dst_;
+  OFX::ChoiceParam* chunkSize_;
+  OFX::ChoiceParam* merge_;
+  OFX::IntParam* roiMargin_;
+  OFX::BooleanParam* roiMask_;
+  OFX::BooleanParam* roiLimit_;
+  OFX::StringParam* roiState_;
+  OFX::StringParam* roiInfo_;
   OFX::ChoiceParam* colour_;
   OFX::StringParam* status_;
   OFX::BooleanParam* showMarker_;
@@ -1133,7 +1376,6 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     dst->addSupportedComponent(OFX::ePixelComponentAlpha);
     dst->addSupportedComponent(OFX::ePixelComponentRGBA);
     dst->setSupportsTiles(false);
-
     // Flame (test 2/3 screenshots): params flow into columns of <= 5 rows, 6 columns per
     // tab; each group starts a column; tabs are named after OFX pages in order. Earlier
     // builds listed every param as a page child and Flame ignored page membership. Here
@@ -1210,6 +1452,47 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
                   "Use this column's values for every new LTX Alpha Gen node."),
           gPerf);
 
+    // --- Chunking (4 rows; decisions 61, 62) ---
+    auto* gChunk = group("grpChunk", "Chunking", main);
+    auto* csize = labelled(desc.defineChoiceParam(kPChunkSize), "Chunk Size",
+                           "Frames per model run. Auto: the longest that fits the free GPU memory. "
+                           "Smaller chunks need less memory but have more seams, and the model may "
+                           "pick a different main object in each chunk.");
+    for (const char* c : kChunkSizeNames) csize->appendOption(c);
+    csize->setDefault(0);
+    csize->setEvaluateOnChange(false);
+    place(*csize, gChunk);
+    auto* merge = labelled(desc.defineChoiceParam(kPMerge), "Merge",
+                           "How overlapping chunks are joined. Smooth: an eased dissolve. Flow Warp: "
+                           "the two mattes are warped towards each other first, so edges move instead "
+                           "of ghosting (a few seconds per seam).");
+    for (const char* c : kMergeNames) merge->appendOption(c);
+    merge->setDefault(0);
+    merge->setEvaluateOnChange(false);
+    place(*merge, gChunk);
+
+    // --- ROI (4 rows; decision 63): the matte is the picture's own alpha ---
+    auto* gRoi = group("grpRoi", "ROI (Alpha)", main);
+    place(*label(kPRoiInfo, "ROI", "Alpha = ROI"), gRoi);
+    auto* rmargin = labelled(desc.defineIntParam(kPRoiMargin), "ROI Margin (px)",
+                             "Pixels of context added around the matte's bounding box over the whole "
+                             "clip (at least 32). The crop is also at least 512 pixels per side and a "
+                             "multiple of 32.");
+    rmargin->setRange(kRoiMinMargin, 2048);
+    rmargin->setDisplayRange(kRoiMinMargin, 256);
+    rmargin->setDefault(64);
+    place(*rmargin, gRoi);
+    auto* rmask = labelled(desc.defineBooleanParam(kPRoiMask), "Black Out Outside ROI",
+                           "Black out everything outside the alpha matte before inference, a stronger "
+                           "cue than the crop alone. Dilate the matte upstream if it is tight.");
+    rmask->setDefault(false);
+    place(*rmask, gRoi);
+    auto* rlimit = labelled(desc.defineBooleanParam(kPRoiLimit), "Multiply Result by ROI",
+                            "Multiply the result by the ROI matte (applied when viewing, no "
+                            "reprocessing needed).");
+    rlimit->setDefault(false);
+    place(*rlimit, gRoi);
+
     // --- Cache (5 rows) ---
     auto* gCache = group("grpCache", "Cache", main);
     auto* cdir = labelled(desc.defineStringParam(kPCacheDir), "Cache Folder",
@@ -1225,10 +1508,10 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
           gCache);
 
     // --- Spacers (decision 52): Flame ignores page membership and starts a new tab only when
-    // the current one passes 6 columns. Three blank columns fill tab 1 (Alpha Gen,
-    // Performance, Cache + 3), so Licence/Models overflow to tab 2, which Flame names after
+    // the current one passes 6 columns. One blank column fills tab 1 (Alpha Gen,
+    // Performance, Chunking, ROI, Cache + 1), so Licence/Models overflow to tab 2, which Flame names after
     // the next page ("Setup"). Each spacer holds one blank label so Flame cannot drop it.
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 1; ++i) {
       const std::string g = "grpSpacer" + std::to_string(i);
       const std::string l = "spacer" + std::to_string(i);
       place(*label(l.c_str(), " ", ""), group(g.c_str(), " ", main));
@@ -1325,6 +1608,10 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     }
 
     // --- Hidden ---
+    auto* roist = desc.defineStringParam(kPRoiState);
+    roist->setDefault("");
+    roist->setIsSecret(true);
+    roist->setEvaluateOnChange(false);
     auto* init = desc.defineBooleanParam(kPInitialized);
     init->setDefault(false);
     init->setIsSecret(true);
