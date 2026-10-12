@@ -49,10 +49,7 @@ the plugin via standard Flame nodes, and connect it to the matte channel of the 
 13. Click the 'Process' button to run the model. It will show a progress bar and time
 estimate. Once the processing is complete it will automatically update the viewer. 
 The image output will show an overlay, and the matte output will have the matte.
-14. Optional: for a clip with several subjects, put a matte of the one you want in the picture's
-alpha (see 'ROI'), so the model only looks at that region. On a smaller GPU, or for very long
-clips, see 'Chunking'.
-15. The output is cached locally to avoid re-running the model. If you're done you 
+14. The output is cached locally to avoid re-running the model. If you're done you 
 may want to use the 'Purge Cache' button to purge those files. 
 
 ## Origins
