@@ -23,7 +23,10 @@ respecting the revenue threshold (USD 10M) above which you need a paid licence f
 2. If satisfied, tick 'I Accept' to unlock the rest of the functions.
 3. You need to enter your Hugging Face token to facilitate the download. If you don't have
 one yet, sign up for a free account to generate one, and accept the terms of the two LTX
-model repos there (see Setup below).
+model repos there (see Setup below). **Important**: you need to accept the licensing terms 
+on Hugging Face for the LTX 2.5 base model and the IC Lora Alpha Gen, otherwise the download
+may fail. Please check https://huggingface.co/Lightricks/LTX-2.5 and 
+https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Alpha-Gen.
 4. You can change the folder where models will be stored from the default.
 5. Important: if you have previously downloaded these model files, you can provide the 
 folder where they are ('Existing Models'), and the plugin will copy them locally instead of
@@ -38,13 +41,18 @@ available VRAM and guide you. If you're low on VRAM, it may be useful to go to t
 Resource Manager and purge unused VRAM so the plugin can use it.
 10. If you process multiple media, uncheck 'Unload GPU' and the model will be kept in
 memory reducing runtime considerably. This needs more VRAM: on a 48 GB card, leave it on.
-11. Click the 'Process' button to run the model. It will show a progress bar and time
+11. If your GPU has low VRAM, use a smaller chunk size. It reduces the needed VRAM size. 
+Be aware the model could change the 'dominant object' in different chunks, and that 
+there will be seams. Make an informed choice.
+12. You can provide an ROI to focus on one part of the shot. Create a matte outside of
+the plugin via standard Flame nodes, and connect it to the matte channel of the plugin.
+13. Click the 'Process' button to run the model. It will show a progress bar and time
 estimate. Once the processing is complete it will automatically update the viewer. 
 The image output will show an overlay, and the matte output will have the matte.
-12. Optional: for a clip with several subjects, put a matte of the one you want in the picture's
+14. Optional: for a clip with several subjects, put a matte of the one you want in the picture's
 alpha (see 'ROI'), so the model only looks at that region. On a smaller GPU, or for very long
 clips, see 'Chunking'.
-13. The output is cached locally to avoid re-running the model. If you're done you 
+15. The output is cached locally to avoid re-running the model. If you're done you 
 may want to use the 'Purge Cache' button to purge those files. 
 
 ## Origins
