@@ -24,6 +24,7 @@ REAL_CONFIG="$HOME/.config/ltx-alphagen/config.conf"
 conf() { sed -n "s/^$1=//p" "$REAL_CONFIG" 2>/dev/null | tail -1; }
 LTX_PYTHON=$(conf ltx_python)
 MODEL_DIR=$(conf model_dir); MODEL_DIR=${MODEL_DIR%/}
+FP16=$(conf transformer_fp16)  # decision 68: the full tier then runs the fp16 path
 REAL_CACHE=$(conf cache_dir); REAL_CACHE=${REAL_CACHE:-$HOME/.cache/ltx-alphagen/mattes}
 if [ "$TIER" = full ] && { [ ! -x "$LTX_PYTHON" ] || [ ! -d "$MODEL_DIR" ] || [ ! -f "$REAL_CACHE/prompt-empty.safetensors" ]; }; then
   echo "full tier: needs a completed Setup for this user (ltx_python, model_dir and the prompt cache in $REAL_CONFIG)" >&2
@@ -58,6 +59,7 @@ fi
 
 ARGS=(--bundle "$BUNDLE" --tier "$TIER" --out "$OUT" --ltx-python "$LTX_PYTHON" --job-python "$JOB_PYTHON")
 [ -n "$MODEL_DIR" ] && ARGS+=(--model-dir "$MODEL_DIR")
+[ -n "$FP16" ] && [ "$TIER" = full ] && ARGS+=(--fp16 "$FP16")
 [ -n "$ONLY" ] && ARGS+=(--only "$ONLY")
 [ -n "$TIMEOUT" ] && ARGS+=(--job-timeout "$TIMEOUT")
 echo "run_systest: tier $TIER, bundle $BUNDLE, work $WORK" | tee "$OUT/console.log"

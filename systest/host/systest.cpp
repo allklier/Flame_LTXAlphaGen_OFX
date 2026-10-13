@@ -40,6 +40,7 @@ namespace {
 
 struct Options {
   std::string bundle, tier = "fast", out = ".", ltxPython, modelDir, jobPython = "/usr/bin/python3";
+  std::string fp16;  // the real setup's transformer_fp16 ("" = not set; decision 68)
   double jobTimeout = 0;  // 0: tier default
   std::set<std::string> only;
 };
@@ -371,6 +372,7 @@ struct Ctx {
     c["models_ready"] = "systest";
     c["ltx_python"] = opt.ltxPython;
     if (!opt.modelDir.empty()) c["model_dir"] = opt.modelDir;
+    if (!opt.fp16.empty()) c["transformer_fp16"] = opt.fp16;
     writeConfig(c);
     if (in && !in->getInt("acceptLicence")) in->setBool("acceptLicence", true);
   }
@@ -759,7 +761,12 @@ void testRealMatte(Ctx& c) {
   const auto csv = home() + "/.cache/ltx-alphagen/logs/vram_stats.csv";
   Job j = runJob(*in, c.jobTimeout());
   REQUIRE(j.state == "done", "real job " + j.state + " " + j.message);
-  note("real model: 33 frames 512x512 bf16 in " + std::to_string(int(j.seconds)) + " s");
+  // Decision 68: on a Mac whose Setup made the fp16 copy, the dropdown's bf16 runs as fp16.
+  const std::string log = readFile(home() + "/.cache/ltx-alphagen/logs/ltx-alphagen.log");
+  const std::string ran = contains(log, "prec=fp16|") ? "fp16" : "bf16";
+  CHECK(ran == (c.opt.fp16 == "1" ? "fp16" : "bf16"),
+        "precision that ran (" + ran + ") matches transformer_fp16=" + c.opt.fp16);
+  note("real model: 33 frames 512x512 " + ran + " in " + std::to_string(int(j.seconds)) + " s");
   double inside = 0, outside = 0, err = 0;
   long nin = 0, nout = 0, nall = 0;
   for (int f = 0; f < sc.n; ++f) {
@@ -863,6 +870,7 @@ int main(int argc, char** argv) {
     else if (k == "--ltx-python") o.ltxPython = v;
     else if (k == "--model-dir") o.modelDir = v;
     else if (k == "--job-python") o.jobPython = v;
+    else if (k == "--fp16") o.fp16 = v;
     else if (k == "--job-timeout") o.jobTimeout = std::atof(v.c_str());
     else if (k == "--only") {
       std::stringstream ss(v);
