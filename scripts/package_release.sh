@@ -12,6 +12,15 @@ VERSION=$(sed -n 's/^set(LTXAG_VERSION "\([0-9.]*\)")/\1/p' "$SRC/CMakeLists.txt
 [ -n "$VERSION" ] || { echo "no LTXAG_VERSION in CMakeLists.txt" >&2; exit 1; }
 NAME="LTXAlphaGen-$VERSION"
 
+# Release gate (systest/README.md): this commit must have passed the system test on Linux
+# (scripts/system_test.sh), from a clean checkout. SKIP_SYSTEST=1 overrides (say why in the notes).
+if [ "${SKIP_SYSTEST:-0}" != 1 ]; then
+  [ -z "$(git -C "$SRC" status --porcelain)" ] ||
+    { echo "uncommitted changes: commit, run scripts/system_test.sh, then package (or SKIP_SYSTEST=1)" >&2; exit 1; }
+  PASSFILE="$SRC/dist/systest/$(git -C "$SRC" rev-parse --short HEAD)/linux/PASS"
+  [ -f "$PASSFILE" ] || { echo "no system-test pass for this commit on Linux ($PASSFILE): run scripts/system_test.sh (or SKIP_SYSTEST=1)" >&2; exit 1; }
+fi
+
 ssh "$HOST" "mkdir -p $REMOTE/src"
 rsync -a --delete --exclude .git --exclude build --exclude dist --exclude __pycache__ \
   "$SRC/" "$HOST:$REMOTE/src/"

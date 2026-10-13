@@ -163,6 +163,14 @@ add_executable(test_vram_estimate ofx/tests/test_vram_estimate.cpp)
 target_link_libraries(test_vram_estimate PRIVATE ltxag_core)
 add_test(NAME vram_estimate COMMAND test_vram_estimate)
 
+# System test host (systest/README.md): loads the bundle like Flame and runs end-to-end
+# scenarios. Not a ctest: it needs the isolated HOME and fake windows of systest/run_systest.sh.
+add_executable(ltxag_systest systest/host/systest.cpp systest/host/ofx_host.cpp ofx/src/process.cpp
+  ${LTXAG_PLATFORM_SOURCES})
+target_include_directories(ltxag_systest PRIVATE ofx/src systest/host ${OFX_DIR}/include)
+target_link_libraries(ltxag_systest PRIVATE ${LTXAG_PLATFORM_LIBS} pthread)
+add_dependencies(ltxag_systest ${BUNDLE_NAME} bundle_resources)
+
 add_executable(test_load_bundle ofx/tests/test_load_bundle.cpp)
 target_include_directories(test_load_bundle PRIVATE ${OFX_DIR}/include)
 target_link_libraries(test_load_bundle PRIVATE dl)
