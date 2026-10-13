@@ -15,7 +15,9 @@ Silicon on macOS. There is no cloud service and no ComfyUI.
 
 (read full details further down)
 
-- Download the release bundle, unpack it, and run install.sh with 'sudo'
+- Download the release bundle, unpack it, and run install.sh with 'sudo'. You can find
+the install bundles for Linux and MacOS in the right-hand toolbar of GitHub when you
+click on releases.
 - Launch Flame, setup a new batch group and add 'LTX Alpha Gen' OFX node after a media file
 - The first run requires some setup. Open the plugin's Setup tab:
 
