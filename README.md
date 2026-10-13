@@ -53,6 +53,15 @@ The image output will show an overlay, and the matte output will have the matte.
 14. The output is cached locally to avoid re-running the model. If you're done you 
 may want to use the 'Purge Cache' button to purge those files. 
 
+The Alpha Gen tab:
+
+![The Alpha Gen tab in Flame](docs/LTX_OFX_page1.png)
+
+The Setup tab:
+
+![The Setup tab in Flame](docs/LTX_OFX_page2.png)
+
+
 ## Origins
 
 Originally written by Jan Klier and contributed to the Logik community of Autodesk Flame
