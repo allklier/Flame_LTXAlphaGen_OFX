@@ -17,7 +17,7 @@ Steps (decisions 2/7/9/13/20/51), all pinned by model_manifest.json next to this
               --existing and verified -> COPY (hashing while copying), or with --link a symlink to
               it after hashing it in place (decision 66); else download from HF
               (hashing while downloading). Verification = size + SHA-256 from the manifest.
-  3 fp16      macOS only (decision 67): if a matmul probe finds fp16 at least 1.2x faster than
+  3 fp16      macOS only (decision 68): if a matmul probe finds fp16 at least 1.2x faster than
               bf16 on this Mac, an fp16 copy of the transformer in <D> (also when the models are
               linked); config transformer_fp16 = 1 or 0. Never fails Setup.
   3 prompt    build the empty-prompt embedding cache (worker --build-embeddings, own process)
@@ -438,7 +438,7 @@ FP16_MIN_SPEEDUP = 1.2  # below this the extra 42 GB is not worth it (M2-M4 have
 
 
 def make_fp16_copy(py: str, man: dict, model_dir: str, prog: Progress) -> str:
-    """Decision 67, macOS only: "1" when the fp16 copy of the transformer exists and is faster
+    """Decision 68, macOS only: "1" when the fp16 copy of the transformer exists and is faster
     here, else "0". Errors are logged; the plugin then simply runs bf16."""
     worker = os.path.join(WORKER_DIR, "ltx_worker.py")
     entry = next(e for e in man["files"] if e["key"] == "transformer")

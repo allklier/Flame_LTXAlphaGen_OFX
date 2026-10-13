@@ -324,7 +324,7 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
     fails on this Mac's stale Command Line Tools C++ headers, but its fallback is as fast (255 ms
     per 12.9k-token attention call either way).
 
-- **67.** **fp16 transformer on Macs where it is faster** (DECIDED, user 2026-10-13: automatic,
+- **68.** **fp16 transformer on Macs where it is faster** (DECIDED, user 2026-10-13: automatic,
   also with linked models). Experiment on the M1 Ultra, 720p × 49, same seed:
   - **numerics:** no inf/NaN in 384 block outputs; largest activation 13,760 (fp16 max 65,504,
     peak in blocks 40–43); matte error vs truth 0.0029 in both; fp16 vs bf16 matte mean

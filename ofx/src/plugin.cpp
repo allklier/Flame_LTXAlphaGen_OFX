@@ -237,7 +237,7 @@ constexpr bool kMps = true;
 constexpr bool kMps = false;
 #endif
 
-// Decision 67: on a Mac where Setup made the fp16 copy of the transformer (because fp16 is faster
+// Decision 68: on a Mac where Setup made the fp16 copy of the transformer (because fp16 is faster
 // there), the Precision choice "bf16" runs as "fp16": same matte (mean difference 0.0002), its
 // own cache entries and worker. The dropdown itself stays bf16 / fp8.
 std::string effectivePrecision(int prec) {

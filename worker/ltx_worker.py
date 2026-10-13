@@ -16,8 +16,8 @@ Three modes:
       --idle-timeout seconds without jobs (default 300; $LTXAG_IDLE_TIMEOUT overrides), or
       when --flame-pid dies. SOCKET.json holds {pid, precision, model_dir, state, vram_gb}.
   --build-embeddings (child process, see build_embeddings).
-  --fp16-probe / --fp16-convert SRC DST (run by Setup on macOS, decision 67; ltxag_worker/fp16.py).
-Precision "fp16" (macOS, decision 67): the bf16 pipeline with the transformer, its denoising state,
+  --fp16-probe / --fp16-convert SRC DST (run by Setup on macOS, decision 68; ltxag_worker/fp16.py).
+Precision "fp16" (macOS, decision 68): the bf16 pipeline with the transformer, its denoising state,
 the prompt embedding and the reference latent in fp16, from the fp16 copy Setup made; the VAE
 decode stays bf16. Same matte as bf16 (mean difference 0.0002), 1.40x faster steps on an M1.
 
@@ -306,7 +306,7 @@ class Engine:
         self.accel = Accel(torch)
         self.model_dir, self.precision = model_dir, precision
         self.frames_on_gpu = frames_on_gpu  # A/B only: the pre-2026-10-11 behaviour
-        self.fp16 = precision == "fp16"  # decision 67
+        self.fp16 = precision == "fp16"  # decision 68
         t0 = time.time()
         emit("info", self.accel.describe())
         paths = model_paths_for(model_dir)
@@ -678,7 +678,7 @@ class Server:
 
 
 def main() -> int:
-    if "--fp16-probe" in sys.argv:  # decision 67: Setup asks whether fp16 is faster here
+    if "--fp16-probe" in sys.argv:  # decision 68: Setup asks whether fp16 is faster here
         import torch
 
         bf16_ms, fp16_ms = fp16.probe(torch, Accel(torch).device)

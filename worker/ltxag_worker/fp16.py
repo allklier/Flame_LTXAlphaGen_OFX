@@ -1,4 +1,4 @@
-"""fp16 transformer on Apple Silicon (decision 67). Runs in the LTX venv (needs torch).
+"""fp16 transformer on Apple Silicon (decision 68). Runs in the LTX venv (needs torch).
 
 probe(): times a transformer-sized matmul in bf16 and fp16 on MPS. The M1 has no fast bf16
 (fp16 measured 1.40x faster per denoising step); M2-M4 have native bf16; M5's GPU Neural

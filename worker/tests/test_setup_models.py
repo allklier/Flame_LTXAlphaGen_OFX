@@ -80,7 +80,7 @@ if __name__ == "__main__":
 
 
 class Fp16CopyTest(unittest.TestCase):
-    """Decision 67: Setup's fp16 step, with the probe and the conversion faked."""
+    """Decision 68: Setup's fp16 step, with the probe and the conversion faked."""
 
     def setUp(self) -> None:
         from unittest import mock
