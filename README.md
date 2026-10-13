@@ -455,6 +455,5 @@ haven't measured.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please follow the community guidelines at
-https://github.com/flamelogik.
+Issues and pull requests are welcome. 
 
