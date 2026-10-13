@@ -3,13 +3,14 @@
 #   sudo ./install.sh              install (replaces an earlier LTX Alpha Gen)
 #   sudo ./install.sh --uninstall  remove both
 # Installs:
-#   /usr/OFX/Plugins/LTXAlphaGen.ofx.bundle
+#   /usr/OFX/Plugins/LTXAlphaGen.ofx.bundle             (macOS: /Library/OFX/Plugins)
 #   /opt/Autodesk/shared/python/ltx_alphagen_hook.py   (refreshes the viewer when a job ends)
 # Models, settings and the matte cache are per user and are not touched (see README).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PLUGINS=/usr/OFX/Plugins
+[ "$(uname -s)" = Darwin ] && PLUGINS=/Library/OFX/Plugins  # where the Mac's OFX plugins live
 BUNDLE=LTXAlphaGen.ofx.bundle
 HOOK_DIR=/opt/Autodesk/shared/python
 HOOK=ltx_alphagen_hook.py
@@ -56,6 +57,8 @@ if [ -e "$PLUGINS/$BUNDLE" ] || [ -L "$PLUGINS/$BUNDLE" ]; then
 fi
 cp -R "$HERE/$BUNDLE" "$PLUGINS/"
 chmod -R a+rX "$PLUGINS/$BUNDLE"
+# macOS: a downloaded tarball marks every file as quarantined; the bundle is not notarised.
+[ "$(uname -s)" = Darwin ] && xattr -dr com.apple.quarantine "$PLUGINS/$BUNDLE" 2>/dev/null || true
 echo "installed $PLUGINS/$BUNDLE"
 
 if [ -d "$HOOK_DIR" ]; then

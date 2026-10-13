@@ -3,12 +3,13 @@
 OFX plugin for Autodesk Flame to run LTX 2.5 Alpha Gen models
 
 Generate an alpha matte from an RGB clip, directly in Flame, using Lightricks'
-**LTX-2.5 Alpha Gen** IC-LoRA. It runs locally on your own NVIDIA GPU. There is no cloud service
-and no ComfyUI.
+**LTX-2.5 Alpha Gen** IC-LoRA. It runs locally on your own GPU: NVIDIA on Linux, or Apple
+Silicon on macOS. There is no cloud service and no ComfyUI.
 
-> **Status: v0.1 (first release).** The plugin works in Flame and has produced good mattes on
-> real footage. Setup is guided, and the viewer refreshes by itself when a job finishes. See
-> [Status and roadmap](#status-and-roadmap) for what is not built yet.
+> **Status: v0.1.4.** The plugin works in Flame and has produced good mattes on real footage.
+> Setup is guided, and the viewer refreshes by itself when a job finishes. New in 0.1.4: **macOS
+> on Apple Silicon** (much slower than a large NVIDIA GPU; see [macOS](#macos-apple-silicon)).
+> See [Status and roadmap](#status-and-roadmap) for what is not built yet.
 
 ## Quick Start
 
@@ -64,7 +65,8 @@ following the guidelines at https://github.com/flamelogik
 
 ## Requirements
 
-- Autodesk Flame on **Linux** (developed and tested on Rocky Linux 9.7 with Flame 2027.1). MacOS is not supported at this time, but may be coming.
+- Autodesk Flame on **Linux** (developed and tested on Rocky Linux 9.7 with Flame 2027.1), or on
+  **macOS** with Apple Silicon (see [macOS](#macos-apple-silicon) for its own requirements).
 - An **NVIDIA GPU with a lot of VRAM**. Measured peak usage with the official LTX pipeline:
 
   | Size | Frames | bf16 | fp8 |
@@ -86,6 +88,34 @@ following the guidelines at https://github.com/flamelogik
   Python development packages are needed: Setup installs its own Python (3.14) with everything it
   needs, independent of the system Python.
 - A free [Hugging Face](https://huggingface.co) account, if you need to download the model files.
+
+### macOS (Apple Silicon)
+
+The Mac version runs the same model with PyTorch on the Apple GPU (MPS). It works, but it is
+**much slower** than a large NVIDIA card. Tested on an M1 Ultra with 128 GB (Flame 2027.2):
+
+| Clip | Time | Memory used |
+|---|---|---|
+| 1280×720, 49 frames | 11 min | 52 GB |
+| 1920×1080, 33 frames | 19 min | 60 GB |
+| 1920×1080, 73 frames | 48 min | 80 GB |
+
+That is about 50 s per HD frame (a large NVIDIA GPU: about 1.6 s). It suits short shots,
+lower resolutions or overnight runs.
+
+- **Memory:** the GPU shares the Mac's memory and can use about 75% of it. With 128 GB, Full
+  chunks (145 frames) at HD don't fit; **Chunk Size Auto** picks Half or Quarter for you.
+  Going over the limit makes macOS swap to disk (everything slows down) rather than stop with
+  an error.
+- **Precision:** bf16 only. fp8 doesn't exist on the Apple GPU; choosing it shows a message.
+- **Apple's Command Line Tools** are required (the progress window and a GPU helper are
+  compiled on first use). If they are missing, run `xcode-select --install` in Terminal.
+- **Disk:** the same ~80 GB as on Linux, unless you link to existing model files (see
+  [Existing Models](#3-choose-the-folders)).
+- **Cancel** stops the job within a few seconds; the GPU may stay busy for a few seconds more
+  while it finishes work it had already started.
+- Only the M1 Ultra has been tested. Later chips (M2 and up) have faster bf16 and should do
+  better; the plugin picks the faster setting by itself.
 
 ## How it works
 
@@ -126,18 +156,21 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 
 ### From a release (recommended)
 
-1. Download `LTXAlphaGen-<version>-rocky9.tar.gz` from the GitHub releases page and unpack it.
+1. Download the release for your system from the GitHub releases page and unpack it:
+   `LTXAlphaGen-<version>-rocky9.tar.gz` (Linux) or `LTXAlphaGen-<version>-macos-arm64.tar.gz`
+   (macOS on Apple Silicon).
 2. Quit Flame.
-3. Run the installer with sudo (it writes to `/usr/OFX/Plugins`):
+3. Run the installer with sudo (it writes to Flame's OFX folder):
 
    ```
-   tar xzf LTXAlphaGen-0.1.3-rocky9.tar.gz
-   cd LTXAlphaGen-0.1.3
+   tar xzf LTXAlphaGen-0.1.4-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
+   cd LTXAlphaGen-0.1.4
    sudo ./install.sh
    ```
 
    It installs:
-   - `/usr/OFX/Plugins/LTXAlphaGen.ofx.bundle` (the plugin; an earlier version is replaced);
+   - `/usr/OFX/Plugins/LTXAlphaGen.ofx.bundle` on Linux, `/Library/OFX/Plugins/LTXAlphaGen.ofx.bundle`
+     on macOS (the plugin; an earlier version is replaced);
    - `/opt/Autodesk/shared/python/ltx_alphagen_hook.py` (the refresh hook). It will not replace
      a different file of that name.
 4. Start Flame. In Batch, the node is under **LTX > LTX Alpha Gen**.
@@ -194,8 +227,11 @@ In the **Models** column:
   volume is a better choice than the home folder.
 - **Existing Models** (optional): a folder that may already hold the model files, for example a
   ComfyUI models folder. Setup searches it by exact file name, checks each file's size and
-  SHA-256 checksum against the list shipped with the plugin, and **copies** the matching files
-  into the Model Folder instead of downloading them. Files that don't match are ignored.
+  SHA-256 checksum against the list shipped with the plugin, and uses the matching files instead
+  of downloading them. Files that don't match are ignored. When you press Download, it asks
+  whether to **link** to them (saves up to 73 GB; the folder must then stay where it is and
+  stay available, and on a network folder every model load is slower) or **copy** them into
+  the Model Folder.
 
 ### 4. Download
 
@@ -210,7 +246,7 @@ A progress window shows each step, with Cancel:
    plus OpenColorIO. The package versions are pinned by a lock file shipped with the plugin, so
    every install is the same environment. Takes a few minutes.
 2. **Models**: for each of the six files, either keep it (already in the Model Folder and
-   checked before), copy it from Existing Models, or download it from Hugging Face. Every file is
+   checked before), copy or link it from Existing Models, or download it from Hugging Face. Every file is
    checked with its SHA-256 checksum while it is copied or downloaded. Downloads show "x of y GB"
    and speed.
 3. **Prompt cache**: a one-time step that runs the Gemma text encoder once, so it never has to be
@@ -379,7 +415,8 @@ This is not legal advice, and the licensing notes will be reviewed before a publ
 
 ## Status and roadmap
 
-**Works today:** the plugin in Flame with the real Alpha Gen worker; guided Setup (runtime
+**Works today:** the plugin in Flame with the real Alpha Gen worker, on Linux (NVIDIA) and on
+macOS (Apple Silicon, slower); guided Setup (runtime
 install, Hugging Face download, reuse of existing model files, checksum verification); input
 colour conversion; bf16 and fp8; a resident model with Unload GPU; a clip-size-aware memory check
 with a warning; a progress window with time left; automatic viewer refresh; the disk matte cache;
@@ -395,7 +432,7 @@ logging and Collect Logs.
 - Processing only the frames that are not cached yet. Process always processes the whole clip.
 - Background Reactor rendering is untested (Batch Render works).
 - An offline install of the Python packages for workstations without internet.
-- Native metal implementation on MacOS
+- A native MLX (Metal) implementation for macOS, if it turns out clearly faster than PyTorch.
 
 ## Support and logs
 

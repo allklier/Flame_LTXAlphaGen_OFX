@@ -10,9 +10,10 @@ endif()
 
 option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence gate" ON)
 # Release version (v0.1 = first release 2026-10-11; 0.1.1 = SETUP REQUIRED on the image output;
-# 0.1.2 = runtime on uv's own pinned Python + C compiler check; 0.1.3 = Chunk Size, Merge, ROI).
+# 0.1.2 = runtime on uv's own pinned Python + C compiler check; 0.1.3 = Chunk Size, Merge, ROI;
+# 0.1.4 = macOS on Apple Silicon (PyTorch-MPS), link to existing models, Setup refresh, Cancel).
 # Also the OFX plugin version (major.minor) and the release package name.
-set(LTXAG_VERSION "0.1.3")
+set(LTXAG_VERSION "0.1.4")
 string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
 list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
 list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)

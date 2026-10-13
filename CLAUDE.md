@@ -13,7 +13,8 @@ Tags: **DECIDED** (maintainer approved), **PROPOSED** (recommended, not yet appr
 
 ## Goal
 
-An OFX plugin for Autodesk Flame on **Rocky Linux 9** (NVIDIA only, no macOS) that runs
+An OFX plugin for Autodesk Flame on **Rocky Linux 9** (NVIDIA) and, since 0.1.4, **macOS on Apple
+Silicon** (PyTorch-MPS, decision 65) that runs
 Lightricks' **LTX-2.5 Alpha Gen** IC-LoRA and produces an alpha matte from an RGB clip. It can be
 shared publicly: **users download their own weights and are responsible for their own LTX
 licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-facing view.
@@ -370,13 +371,14 @@ Flame Python hook: polls refresh markers → steps the current frame and back
   bundle's `Resources/flame_hook/`.
 - `packaging/install.sh` (in the release tarball); `scripts/build_remote.sh` (sync, build, ctest
   on a Rocky 9 machine) and `scripts/package_release.sh` (the tarball into `dist/`, git-ignored);
-  both take `HOST=<ssh host>`.
+  both take `HOST=<ssh host>`. macOS: `scripts/build_mac.sh` and `scripts/package_release_mac.sh`
+  (`HOST`, `REMOTE`, `CMAKE`, `CMAKE_ARGS`; `LTXAlphaGen-<v>-macos-arm64.tar.gz`).
 - `tools/`: `make_test_clip.py`, `measure_run.sh` (official-CLI VRAM/time runs), `worker_smoke.py`,
   `job_real_smoke.py`, `resident_smoke.py`, `setup_smoke.sh`, `nvml_probe.cpp` (NVML vs
   nvidia-smi).
 - `third_party/openfx`: OpenFX `OFX_Release_1_4_TAG`, `include/` + `Support/` only (BSD,
   `VENDORED.txt`).
-- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.3; the OFX
+- Plugin id `com.janklier.ltx.alphagen`, version from CMake `LTXAG_VERSION` (0.1.4; the OFX
   version is its major.minor), grouping "LTX". `LTXAG_DEV_BUILD=ON` (the CMake default, for local
   tests) adds a Prototype page: Sim Seconds, Simulate, Sim VRAM GB, Worker Python, Enforce Gate,
   Auto Refresh, Use Dummy. Release builds (`OFF`) hide those params but still define them, so
@@ -670,7 +672,9 @@ process per run incl. model load, Gemma loaded and freed in process):
   `tools/worker_smoke.py`, `job_real_smoke.py`, `resident_smoke.py`, `setup_smoke.sh`. All are
   host-free: re-entrancy bugs like the setValue recursion would need a fake OFX host (not built),
   so they are found by testing in Flame.
-- **Installer:** `packaging/install.sh` installs the bundle into `/usr/OFX/Plugins` and the hook
+- **Installer:** `packaging/install.sh` installs the bundle into `/usr/OFX/Plugins` (macOS:
+  `/Library/OFX/Plugins`, and it removes the download quarantine flag; the bundle is only
+  ad-hoc signed, not notarised) and the hook
   into `/opt/Autodesk/shared/python`, refuses to replace a hook file that isn't ours, and has
   `--uninstall`. It replaces a symlinked dev install with a copy.
 
