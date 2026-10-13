@@ -237,6 +237,17 @@ constexpr bool kMps = true;
 constexpr bool kMps = false;
 #endif
 
+// Decision 67: on a Mac where Setup made the fp16 copy of the transformer (because fp16 is faster
+// there), the Precision choice "bf16" runs as "fp16": same matte (mean difference 0.0002), its
+// own cache entries and worker. The dropdown itself stays bf16 / fp8.
+std::string effectivePrecision(int prec) {
+  if (kMps && prec == 0) {
+    const UserConfig cfg = loadUserConfig();
+    if (cfg.count("transformer_fp16") && cfg.at("transformer_fp16") == "1") return "fp16";
+  }
+  return kPrecisions[prec];
+}
+
 Defaults computeDefaults() {
   Defaults d;
   const VramInfo v = queryVram();
@@ -770,7 +781,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     int colour = 0, prec = 0;
     colour_->getValue(colour);
     precision_->getValue(prec);
-    std::string sig = std::string("v1|cs=") + kColourSpaces[colour] + "|prec=" + kPrecisions[prec] +
+    std::string sig = std::string("v1|cs=") + kColourSpaces[colour] + "|prec=" + effectivePrecision(prec) +
                       "|model=" + (useDummy() ? kDummyVersion : kModelVersion);
     const RoiState st = roiOverride ? *roiOverride : currentRoiState();
     if (st.valid) {
@@ -873,7 +884,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const double available = v.freeGB + reusable - head;
     LOGI("preflight: %s %dx%d longest chunk %d -> model %dx%dx%d, need %.1f GB%s; free %.1f + resident "
          "%.1f - reserve %.1f = %.1f GB available (nvml %s)",
-         kPrecisions[prec], w, h, longest, est.modelW, est.modelH, est.modelFrames, need,
+         effectivePrecision(prec).c_str(), w, h, longest, est.modelW, est.modelH, est.modelFrames, need,
          simNeed > 0.0 ? " (simulated)" : "", v.freeGB, reusable, head, available, v.ok ? "ok" : "unavailable");
     bool warned = false;
     if (v.ok && need > available) {
@@ -895,7 +906,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       LOGW("preflight: GPU %.1f GB total, %.1f free; Flame holds %.1f GB, LTX worker %.1f GB, other apps %.1f GB (%s)",
            v.totalGB, v.freeGB, flame, reusable, others, list.c_str());
       std::string msg = "This clip may not fit in GPU memory.\n\nEstimated need: about " + fmtGB(need) +
-                        " GB (" + kPrecisions[prec] + ", " + std::to_string(est.modelW) + "x" +
+                        " GB (" + effectivePrecision(prec) + ", " + std::to_string(est.modelW) + "x" +
                         std::to_string(est.modelH) + ", " + std::to_string(est.modelFrames) +
                         " frames per chunk).\nAvailable: " + fmtGB(available) + " GB = " + fmtGB(v.freeGB) +
                         " GB free";
@@ -1089,7 +1100,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
     js
        << ",\"seconds\":" << seconds << ",\"simulate\":" << jsonStr(kSimulations[sim])
-       << ",\"precision\":" << jsonStr(kPrecisions[prec]) << ",\"vram\":" << vramJson
+       << ",\"precision\":" << jsonStr(effectivePrecision(prec)) << ",\"vram\":" << vramJson
        << ",\"flame_pid\":" << getpid()
        << ",\"title\":" << jsonStr("LTX Alpha Gen - " + std::to_string(n) + " frames") << "}";
     const std::string manifest = stagingDir() + "/ltxag_job_" + jobId + ".json";

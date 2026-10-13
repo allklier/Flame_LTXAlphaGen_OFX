@@ -107,11 +107,13 @@ lower resolutions or overnight runs.
   chunks (145 frames) at HD don't fit; **Chunk Size Auto** picks Half or Quarter for you.
   Going over the limit makes macOS swap to disk (everything slows down) rather than stop with
   an error.
-- **Precision:** bf16 only. fp8 doesn't exist on the Apple GPU; choosing it shows a message.
+- **Precision:** bf16. fp8 doesn't exist on the Apple GPU; choosing it shows a message. On Macs
+  where it is faster (the M1 family), Setup also makes an **fp16 copy** of the main model
+  (42 GB more disk, about 1.4× faster processing, same matte) and the plugin uses it by itself.
 - **Apple's Command Line Tools** are required (the progress window and a GPU helper are
   compiled on first use). If they are missing, run `xcode-select --install` in Terminal.
 - **Disk:** the same ~80 GB as on Linux, unless you link to existing model files (see
-  [Existing Models](#3-choose-the-folders)).
+  [Existing Models](#3-choose-the-folders)), plus 42 GB for the fp16 copy where it is used.
 - **Cancel** stops the job within a few seconds; the GPU may stay busy for a few seconds more
   while it finishes work it had already started.
 - Only the M1 Ultra has been tested. Later chips (M2 and up) have faster bf16 and should do

@@ -324,6 +324,33 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
     fails on this Mac's stale Command Line Tools C++ headers, but its fallback is as fast (255 ms
     per 12.9k-token attention call either way).
 
+- **67.** **fp16 transformer on Macs where it is faster** (DECIDED, user 2026-10-13: automatic,
+  also with linked models). Experiment on the M1 Ultra, 720p × 49, same seed:
+  - **numerics:** no inf/NaN in 384 block outputs; largest activation 13,760 (fp16 max 65,504,
+    peak in blocks 40–43); matte error vs truth 0.0029 in both; fp16 vs bf16 matte mean
+    difference 0.00024 (99th percentile 0.0015). Weights: none beyond fp16's range, 0.0003 %
+    of the nonzero ones become 0;
+  - **speed:** steps 54.6 → 38.9 s (1.40×), job 692 → 583 s (1.19×), more at HD;
+  - **memory:** casting at load (`Builder.build(dtype=fp16)`) held ~26 GB more (78.5 vs 52.7 GB
+    peak) and loaded slower; an **fp16 copy of the checkpoint** loads like the bf16 file
+    (52.3 GB both). So Setup writes that copy.
+  - **Built:** `worker/ltxag_worker/fp16.py` (`probe`: 4096² matmul bf16 vs fp16 on MPS;
+    `convert`: streaming BF16 → F16, F32 tables and metadata kept, ~80 s on NVMe), run through
+    `ltx_worker.py --fp16-probe` / `--fp16-convert`. Setup (macOS only) probes after the models
+    step; at ≥ 1.2× it writes `<Model Folder>/diffusion_models/…-fp16.safetensors` (a real file
+    even when the bf16 one is linked; `.verified` marker tied to the bf16 sha256), sets config
+    `transformer_fp16=1`, else `0`; probe or conversion failures only log and leave bf16.
+    The plugin's `effectivePrecision()` turns the dropdown's "bf16" into "fp16" on such a Mac:
+    the cache key (`prec=fp16`), the manifest, the warning; the worker restarts on the change.
+    Worker precision "fp16" = the bf16 pipeline with transformer, denoising state, prompt
+    embedding and reference latent in fp16, VAE decode in bf16; a missing copy is an error
+    (decision 34). Memory model: the same as bf16 (equal at 720p; **HD unmeasured**).
+  - **Why per Mac, not per chip:** M1 has no fast bf16; M2–M4 have native bf16 (probably no
+    gain, then no 42 GB); M5's Neural Accelerators take fp16 but not bf16, and whether PyTorch
+    reaches them is open (`tools/mac_bench.py`: PyTorch-MPS vs MLX, fp16/bf16/fp32, run with any
+    python3 or Flame's; M1 Ultra: matmul fp16 17.5 / bf16 8.8 TFLOPS in PyTorch, 16.5 / 14.7 in
+    MLX). The probe measures what PyTorch actually gets.
+
 ## Architecture (as built)
 
 ```

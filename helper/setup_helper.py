@@ -17,6 +17,9 @@ Steps (decisions 2/7/9/13/20/51), all pinned by model_manifest.json next to this
               --existing and verified -> COPY (hashing while copying), or with --link a symlink to
               it after hashing it in place (decision 66); else download from HF
               (hashing while downloading). Verification = size + SHA-256 from the manifest.
+  3 fp16      macOS only (decision 67): if a matmul probe finds fp16 at least 1.2x faster than
+              bf16 on this Mac, an fp16 copy of the transformer in <D> (also when the models are
+              linked); config transformer_fp16 = 1 or 0. Never fails Setup.
   3 prompt    build the empty-prompt embedding cache (worker --build-embeddings, own process)
   4 config    model_dir, ltx_python, runtime_commit, models_ready in ~/.config/ltx-alphagen
 Progress and Cancel in a window (ltxag_worker/oslayer.py). Everything is logged (ltxag_worker/log.py).
@@ -431,6 +434,44 @@ def gather_models(man: dict, model_dir: str, existing: str, token: str, prog: Pr
     return summary
 
 
+FP16_MIN_SPEEDUP = 1.2  # below this the extra 42 GB is not worth it (M2-M4 have native bf16)
+
+
+def make_fp16_copy(py: str, man: dict, model_dir: str, prog: Progress) -> str:
+    """Decision 67, macOS only: "1" when the fp16 copy of the transformer exists and is faster
+    here, else "0". Errors are logged; the plugin then simply runs bf16."""
+    worker = os.path.join(WORKER_DIR, "ltx_worker.py")
+    entry = next(e for e in man["files"] if e["key"] == "transformer")
+    src = os.path.join(model_dir, entry["path"])
+    dst = src.replace("-bf16.safetensors", "-fp16.safetensors")
+    try:
+        prog.update(0.90, "fp16: checking whether it is faster on this Mac")
+        out = subprocess.run([py, "-I", "-B", worker, "--fp16-probe"], capture_output=True, text=True,
+                             timeout=300).stdout
+        line = next(ln for ln in out.splitlines() if ln.startswith("fp16_probe "))
+        bf16_ms, fp16_ms = (float(v) for v in line.split()[1:3])
+        speedup = bf16_ms / max(fp16_ms, 1e-6)
+        log.info(f"fp16 probe: bf16 {bf16_ms:.1f} ms, fp16 {fp16_ms:.1f} ms per matmul -> {speedup:.2f}x")
+        if speedup < FP16_MIN_SPEEDUP:
+            log.info(f"fp16: not faster enough here (< {FP16_MIN_SPEEDUP}x); staying on bf16, no copy")
+            return "0"
+        source = {"sha256": entry["sha256"]}  # the marker ties the copy to the bf16 file it came from
+        if os.path.exists(dst) and already_verified(dst, source):
+            log.info(f"fp16: copy already there and current: {dst}")
+            return "1"
+        run([py, "-I", "-B", worker, "--fp16-convert", src, dst], dict(os.environ),
+            "fp16: making a faster copy of the transformer (42 GB, one time)", prog, 0.90,
+            watch=(os.path.join(os.path.dirname(dst), "fp16-tmp"), entry["size"], 0.92))
+        mark_verified(dst, source)
+        log.info(f"fp16: copy written: {dst} ({speedup:.2f}x faster matmuls here)")
+        return "1"
+    except Cancelled:
+        raise
+    except (SetupError, OSError, subprocess.SubprocessError, StopIteration, ValueError) as exc:
+        log.warn(f"fp16: skipped ({exc}); the plugin runs bf16")
+        return "0"
+
+
 def write_config(updates: dict) -> None:
     cfg: dict = {}
     if os.path.exists(CONFIG):
@@ -482,18 +523,23 @@ def main() -> int:
         os.makedirs(model_dir, exist_ok=True)
         py = a.ltx_python if a.skip_runtime else install_runtime(man, os.path.join(model_dir, "runtime"), prog)
         summary = gather_models(man, model_dir, a.existing, token, prog, link=a.link)
+        fp16_ready = make_fp16_copy(py, man, model_dir, prog) if sys.platform == "darwin" else None
         emb = os.path.join(a.cache_root, "prompt-empty.safetensors")
         worker = os.path.join(WORKER_DIR, "ltx_worker.py")
         m = {e["key"]: os.path.join(model_dir, e["path"]) for e in man["files"]}
         run([py, "-I", "-B", worker, "--build-embeddings", emb, "--transformer", m["transformer"],
              "--text-encoder", m["text_encoder"], "--video-vae", m["video_vae"]],
             dict(os.environ), "building the prompt cache (loads Gemma once)", prog, 0.92)
-        write_config({"model_dir": model_dir, "ltx_python": py, "runtime_commit": man["ltx2"]["commit"],
-                      "models_ready": time.strftime("%Y-%m-%d")})
+        cfg = {"model_dir": model_dir, "ltx_python": py, "runtime_commit": man["ltx2"]["commit"],
+               "models_ready": time.strftime("%Y-%m-%d")}
+        if fp16_ready is not None:
+            cfg["transformer_fp16"] = fp16_ready
+        write_config(cfg)
         prog.close()
         msg = (f"Setup finished in {time.time() - t0:.0f} s. Kept {len(summary['kept'])}, copied "
                f"{len(summary['copied'])}, linked {len(summary['linked'])}, downloaded "
-               f"{len(summary['downloaded'])} file(s).")
+               f"{len(summary['downloaded'])} file(s)."
+               + (" fp16 copy in use: faster on this Mac (+42 GB)." if fp16_ready == "1" else ""))
         log.info(msg + f" copied: {summary['copied']} linked: {summary['linked']} downloaded: {summary['downloaded']}")
         Progress.message("info", msg, ui)
         return 0

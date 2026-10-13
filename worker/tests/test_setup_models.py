@@ -77,3 +77,54 @@ class ExistingModelsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Fp16CopyTest(unittest.TestCase):
+    """Decision 67: Setup's fp16 step, with the probe and the conversion faked."""
+
+    def setUp(self) -> None:
+        from unittest import mock
+
+        self.mock = mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.environ.get("HOME")
+        os.environ["HOME"] = self.tmp.name
+        self.models = os.path.join(self.tmp.name, "models")
+        self.src = os.path.join(self.models, "diffusion_models", "t-bf16.safetensors")
+        self.dst = self.src.replace("-bf16", "-fp16")
+        os.makedirs(os.path.dirname(self.src))
+        with open(self.src, "wb") as f:
+            f.write(DATA)
+        self.man = {"files": [{"key": "transformer", "path": "diffusion_models/t-bf16.safetensors",
+                               "size": len(DATA), "sha256": "a" * 64}]}
+        self.prog = setup_helper.Progress(False)
+        self.converts = 0
+
+    def tearDown(self) -> None:
+        if self.home is not None:
+            os.environ["HOME"] = self.home
+        self.tmp.cleanup()
+
+    def fake_run(self, cmd, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        self.converts += 1
+        with open(cmd[-1], "wb") as f:
+            f.write(b"fp16")
+
+    def go(self, probe_out: str) -> str:
+        done = setup_helper.subprocess.CompletedProcess([], 0, stdout=probe_out)
+        with self.mock.patch.object(setup_helper.subprocess, "run", return_value=done), \
+                self.mock.patch.object(setup_helper, "run", side_effect=self.fake_run):
+            return setup_helper.make_fp16_copy("py", self.man, self.models, self.prog)
+
+    def test_faster_makes_copy_once(self):
+        self.assertEqual(self.go("fp16_probe 80.0 50.0\n"), "1")
+        self.assertTrue(os.path.exists(self.dst) and os.path.exists(self.dst + ".verified"))
+        self.assertEqual(self.go("fp16_probe 80.0 50.0\n"), "1")  # re-run keeps the verified copy
+        self.assertEqual(self.converts, 1)
+
+    def test_not_faster_no_copy(self):
+        self.assertEqual(self.go("fp16_probe 50.0 48.0\n"), "0")
+        self.assertFalse(os.path.exists(self.dst))
+
+    def test_probe_failure_is_not_fatal(self):
+        self.assertEqual(self.go("Traceback: no MPS\n"), "0")

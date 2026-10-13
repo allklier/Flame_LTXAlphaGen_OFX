@@ -16,6 +16,10 @@ Three modes:
       --idle-timeout seconds without jobs (default 300; $LTXAG_IDLE_TIMEOUT overrides), or
       when --flame-pid dies. SOCKET.json holds {pid, precision, model_dir, state, vram_gb}.
   --build-embeddings (child process, see build_embeddings).
+  --fp16-probe / --fp16-convert SRC DST (run by Setup on macOS, decision 67; ltxag_worker/fp16.py).
+Precision "fp16" (macOS, decision 67): the bf16 pipeline with the transformer, its denoising state,
+the prompt embedding and the reference latent in fp16, from the fp16 copy Setup made; the VAE
+decode stays bf16. Same matte as bf16 (mean difference 0.0002), 1.40x faster steps on an M1.
 
 Recipe 1 (decisions 15/16): ICLoraPipeline, skip_stage_2 with 2x width/height, empty prompt,
 LoRA 1.0. Injections into the pinned LTX-2 code (commit 9ec55f9):
@@ -67,7 +71,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import numpy as np  # noqa: E402
 
-from ltxag_worker import colour, padding, transport  # noqa: E402
+from ltxag_worker import colour, fp16, padding, transport  # noqa: E402
 from ltxag_worker.log import Logger  # noqa: E402
 
 MEMORY_REF = "mem://ltxag-reference"
@@ -240,6 +244,10 @@ def model_paths_for(m: str) -> dict:
     }
 
 
+def fp16_transformer_path(model_dir: str) -> str:
+    return model_paths_for(model_dir)["transformer"].replace("-bf16.safetensors", "-fp16.safetensors")
+
+
 def file_id(path: str) -> str:
     st = os.stat(path)
     return f"{os.path.basename(path)}:{st.st_size}"
@@ -298,6 +306,7 @@ class Engine:
         self.accel = Accel(torch)
         self.model_dir, self.precision = model_dir, precision
         self.frames_on_gpu = frames_on_gpu  # A/B only: the pre-2026-10-11 behaviour
+        self.fp16 = precision == "fp16"  # decision 67
         t0 = time.time()
         emit("info", self.accel.describe())
         paths = model_paths_for(model_dir)
@@ -306,15 +315,29 @@ class Engine:
             raise FileNotFoundError(f"model files missing in {model_dir}: {', '.join(missing)}")
         # Before the pipeline exists, so a cache build (child process, Gemma) has the GPU to itself.
         embedding = self._load_or_build_embeddings(embeddings, paths, emit)
+        transformer_file = paths["transformer"]
+        if self.fp16:
+            # The copy Setup made (ltxag_worker/fp16.py) loads like the bf16 file; casting at build
+            # instead held ~26 GB more. No silent fallback to bf16 (decision 34).
+            transformer_file = fp16_transformer_path(model_dir)
+            if not os.path.exists(transformer_file):
+                raise FileNotFoundError(f"the fp16 copy of the transformer is missing ({transformer_file}); "
+                                        "press Download on the Setup tab to make it again")
+            emit("info", f"fp16 transformer from {transformer_file}")
         ic_lora.SequentialVideoFrameSource = MemoryFrameSource  # injection 1
         quant = QuantizationKind("fp8-cast").to_policy(paths["transformer"]) if precision == "fp8" else None
         self.pipeline = ic_lora.ICLoraPipeline(
             model_paths=ModelPaths.from_split(
-                transformer_path=paths["transformer"], text_encoder_path=paths["text_encoder"],
+                transformer_path=transformer_file, text_encoder_path=paths["text_encoder"],
                 video_vae_path=paths["video_vae"], audio_vae_path=paths["audio_vae"]),
             spatial_upsampler_path=paths["upsampler"],
             loras=[LoraPathStrengthAndSDOps(paths["lora"], 1.0, LTXV_LORA_COMFY_RENAMING_MAP)],
             quantization=quant)
+        if self.fp16:
+            self.pipeline.dtype = torch.float16  # latents, noise and reference frames (ic_lora.py:312)
+            self.pipeline._diffusion_stage._dtype = torch.float16  # the denoising state (blocks.py:565)
+            embedding = type(embedding)(embedding.video_encoding.half(), embedding.audio_encoding.half()
+                                        if embedding.audio_encoding is not None else None, embedding.attention_mask)
         self.pipeline.prompt_encoder = CachedPromptEncoder(embedding)  # injection 2
         self.pipeline.audio_decoder = None  # injection 4: video-only output
         if self.accel.kind == "mps":  # injection 6: reference encode in the chip's faster dtype
@@ -455,7 +478,8 @@ class Engine:
                 # and audio decoding is disabled (injection 4).
                 decoded, _, _ = self.pipeline.stream_chunks(
                     prompt="", seed=seed, height=hp * 2, width=wp * 2, num_frames=np_, frame_rate=FRAME_RATE,
-                    images=[], video_conditioning=[(MEMORY_REF, 1.0)], skip_stage_2=True)
+                    images=[], video_conditioning=[(MEMORY_REF, 1.0)], skip_stage_2=True,
+                    vae_dtype=torch.bfloat16 if self.fp16 else None)
                 video = torch.cat([c.video.to("cpu") for c in decoded], dim=0)  # (F,H,W,C) bf16 in [0,1]
             MemoryFrameSource.frames = None
             v = video.float()
@@ -654,6 +678,21 @@ class Server:
 
 
 def main() -> int:
+    if "--fp16-probe" in sys.argv:  # decision 67: Setup asks whether fp16 is faster here
+        import torch
+
+        bf16_ms, fp16_ms = fp16.probe(torch, Accel(torch).device)
+        print(f"fp16_probe {bf16_ms:.2f} {fp16_ms:.2f}", flush=True)
+        return 0
+    if "--fp16-convert" in sys.argv:
+        import torch
+
+        i = sys.argv.index("--fp16-convert")
+        t0 = time.time()
+        zeros, nonzero = fp16.convert(torch, sys.argv[i + 1], sys.argv[i + 2], lambda m: print(m, flush=True))
+        print(f"fp16 copy written in {time.time() - t0:.0f} s; {zeros} of {nonzero} nonzero weights "
+              f"became 0 ({100.0 * zeros / max(1, nonzero):.5f} %)", flush=True)
+        return 0
     if "--build-embeddings" in sys.argv:
         bp = argparse.ArgumentParser()
         bp.add_argument("--build-embeddings", required=True)
@@ -669,7 +708,7 @@ def main() -> int:
     ap.add_argument("--out-prefix", default=None)
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--embeddings", required=True)
-    ap.add_argument("--precision", default="bf16", choices=["bf16", "fp8"])
+    ap.add_argument("--precision", default="bf16", choices=["bf16", "fp8", "fp16"])
     ap.add_argument("--colour", default="Bypass", choices=list(colour.SOURCES))
     ap.add_argument("--ocio-config", default="")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
