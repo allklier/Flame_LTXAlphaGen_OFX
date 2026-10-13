@@ -14,6 +14,20 @@ namespace ltxag {
 namespace {
 std::atomic<unsigned> gSeq{0};
 
+// Reserves `total` bytes so lack of space fails here, not mid-write. Returns 0 or an errno.
+// macOS has no posix_fallocate (not in the MacOSX.sdk fcntl.h): F_PREALLOCATE with
+// F_ALLOCATEALL (all or nothing, sys/fcntl.h) from the end of file, then ftruncate to the
+// same size posix_fallocate leaves.
+int reserve(int fd, off_t total) {
+#if defined(__APPLE__)
+  fstore_t fs{F_ALLOCATEALL, F_PEOFPOSMODE, 0, total, 0};
+  if (fcntl(fd, F_PREALLOCATE, &fs) != 0 || ftruncate(fd, total) != 0) return errno;
+  return 0;
+#else
+  return ::posix_fallocate(fd, 0, total);
+#endif
+}
+
 bool writeAll(int fd, const void* data, size_t len) {
   const char* p = static_cast<const char*>(data);
   while (len > 0) {
@@ -46,7 +60,7 @@ bool FrameWriter::open(const std::string& path, uint32_t w, uint32_t h, uint32_t
   }
   frameBytes_ = size_t(w) * h * 3 * sizeof(uint16_t);
   const off_t total = off_t(sizeof(FrameFileHeader)) + off_t(frameBytes_) * n;
-  const int rc = ::posix_fallocate(fd_, 0, total);
+  const int rc = reserve(fd_, total);
   if (rc != 0) {
     err = "not enough space in " + stagingDir() + " for " + std::to_string(total >> 20) +
           " MB of frames: " + std::strerror(rc);

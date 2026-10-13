@@ -3,9 +3,10 @@
   python worker_smoke.py WORKER_PY MODEL_DIR EMBEDDINGS [W H N PRECISION CHUNKS]
 
 Generates a synthetic clip (soft fuzzy disc over texture, like make_test_clip.py), writes it
-in the shim's /dev/shm input format, runs the worker exactly as job.py would, then checks the
-mattes: right count and size, high inside the disc, low outside. Saves the middle frame as
-/dev/shm/ltxag_smoke_matte.png for a visual check. Exit 0 = pass.
+in the shim's input format into the staging folder (/dev/shm on Linux, the temp folder on macOS),
+runs the worker exactly as job.py would, then checks the mattes: right count and size, high inside
+the disc, low outside. Saves the middle frame as <staging>/ltxag_smoke_matte.png for a visual check
+and chunk 0's mattes as <staging>/ltxag_smoke_matte.npy (float16) for comparing runs. Exit 0 = pass.
 CHUNKS like "0:65" (default: one chunk of all frames).
 """
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -22,6 +24,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "worker"))
 
 from ltxag_worker import transport  # noqa: E402
+
+STAGE = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
 
 
 def make_frames(w: int, h: int, n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -49,8 +53,8 @@ def main() -> int:
     precision = sys.argv[7] if len(sys.argv) > 7 else "bf16"
     chunks = sys.argv[8] if len(sys.argv) > 8 else f"0:{n}"
     frames, truth = make_frames(w, h, n)
-    inp = f"/dev/shm/ltxag_smoke_{os.getpid()}_in.bin"
-    prefix = f"/dev/shm/ltxag_smoke_{os.getpid()}_out"
+    inp = os.path.join(STAGE, f"ltxag_smoke_{os.getpid()}_in.bin")
+    prefix = os.path.join(STAGE, f"ltxag_smoke_{os.getpid()}_out")
     with open(inp, "wb") as f:
         f.write(transport.HEADER.pack(transport.IN_MAGIC, transport.VERSION, w, h, n, 3))
         frames.astype("<f2").tofile(f)
@@ -97,12 +101,13 @@ def main() -> int:
             print(f"FAIL: chunk {i} matte does not separate the subject")
             ok = False
         if i == 0:
+            np.save(os.path.join(STAGE, "ltxag_smoke_matte.npy"), mat.astype(np.float16))
             try:
                 from PIL import Image
 
                 mid = ln // 2
                 Image.fromarray((np.clip(mat[mid], 0, 1) * 255).astype(np.uint8)).resize(
-                    (w // 4, h // 4)).save("/dev/shm/ltxag_smoke_matte.png")
+                    (w // 4, h // 4)).save(os.path.join(STAGE, "ltxag_smoke_matte.png"))
             except ImportError:
                 pass
     print("PASS" if ok else "FAIL", flush=True)

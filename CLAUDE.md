@@ -229,6 +229,72 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
     are built on `macos-mlx`, where they can be tested. `half.h` (F16C) and `process.cpp`
     (`pipe2`, `posix_spawn_file_actions_addclosefrom_np`) get their macOS variants inside those
     files on that branch. `ltx_worker.py` (CUDA, requires input in /dev/shm) stays Linux-only.
+  - **macOS (built on `macos-mlx`):** `platform_macos.cpp` + `platform_macos_metal.mm`. Staging
+    in the per-user temp folder (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, on disk, not RAM);
+    `queryVram` = Metal `recommendedMaxWorkingSetSize` as total, free = min(total, free +
+    inactive pages from `host_statistics64`), driver = the macOS version; `queryGpuProcesses` is
+    empty (no per-process GPU memory API); `processName` = `proc_name`; licence in TextEdit
+    (`open -e`). Inside the shared files: `half.h` NEON, `process.cpp` `pipe`+`FD_CLOEXEC` and
+    `POSIX_SPAWN_CLOEXEC_DEFAULT` (also strips `DYLD_*`), `transport.cpp` `F_PREALLOCATE`
+    (`F_ALLOCATEALL`) + `ftruncate`, `log.cpp` `pthread_threadid_np` (same id as Python's
+    `threading.get_native_id`, checked on the Mac).
+  - **macOS side of `oslayer.py`:** the progress window is `ltxag_worker/mac_progress.swift`, an
+    AppKit window that reads zenity's stdin protocol, compiled once per source version with
+    `xcrun swiftc` into `~/.cache/ltx-alphagen/bin` (first build ~1 min while swiftc fills its
+    module cache, then seconds; cached after). Tested on macOS 15: osascript's AppleScript
+    `progress` draws nothing, the system python3's Tk 8.5 aborts at `Tk()`, a JXA Cocoa window
+    works but needs the untyped ObjC bridge. Messages: osascript `display dialog` (text as argv).
+    `process_name`: basename of `ps -o comm=` (the full executable path when comm is the last
+    column; Flame's is `.../bin/flame.app/Contents/MacOS/flame`, so "flame" as on Linux).
+    Checked on the Mac over ssh (console user logged in): the helper builds (swiftc 6.2.4, 5 s with
+    a warm module cache), "# text"/42/100 exits 0, end of input exits 0, its window is on screen
+    (CGWindowList: 520 wide, floating layer); the `display dialog` window appears too. Not
+    checked: clicking Cancel / the close button (exit 1), and how both look.
+  - **macOS, other Python files:** the hook takes the bundle from `/Library/OFX/Plugins` (where the
+    Mac's other OFX plugins live); `/opt/Autodesk/shared/python` exists on the Mac too
+    (world-writable, empty), but that Flame loads hooks from it there is UNVERIFIED. `test_job`
+    stages in the temp folder off Linux. job.py needs numpy, and macOS's `/usr/bin/python3`
+    (Command Line Tools 3.9) has none, so on macOS the plugin launches job.py with the runtime's
+    python (`ltx_python`, `plugin.cpp` `process()`; Process already refuses without it). All
+    worker tests pass on the Mac under that python (job.py end to end with the dummy worker).
+    setup_helper.py stays on `/usr/bin/python3` (stdlib only); without the Command Line Tools
+    that is Apple's install-prompt stub, so Setup's own "Command Line Tools are missing" error
+    can't appear: the plugin should check `xcode-select -p` before launching it.
+- **65.** **macOS ships on PyTorch-MPS first; the from-scratch MLX port comes later** (DECIDED,
+  user 2026-10-12). Upstream LTX-2 supports Apple Silicon (`mps-sdpa` attention on darwin/arm64,
+  an MPS LoRA-fuse path, eager neighbourhood attention in the VAE without natten), and our
+  `helper/ltx2-uv.lock` already resolves for macOS, so the Mac worker can drive the same
+  `ICLoraPipeline` as Linux. Measured MPS vs MLX data for diffusion transformers does not exist;
+  op-level benchmarks put MLX at most ~2x ahead, so the M1 Ultra itself is the limit. The MLX
+  port (`mlx/PORT_MAP.md`) is worth shipping only if it clearly beats MPS on speed or memory.
+  - **Measured on the M1 Ultra** (128 GB, 96 GB Metal working set, torch 2.14.1 from our lockfile's
+    darwin entry, `tools/worker_smoke.py`, bf16, 2026-10-12):
+
+    | Clip | Encode | Steps (8) | Decode | Job | Peak held | Matte error |
+    |---|---|---|---|---|---|---|
+    | 720p × 49 | 126 s | 440 s (55 s/step) | ~69 s | 674 s | 52.3 GB | 0.0027 |
+    | HD × 33 | 188 s | 776 s (97 s/step) | ~105 s | 1112 s | 60.4 GB | 0.0033 |
+    | HD × 73 | 406 s | 2120 s (265 s/step) | ~220 s | 2861 s | 79.7 GB | 0.0030 |
+
+    About 50 s per new HD frame for Half and Quarter alike; HD × 145 would need ~115 GB (over the
+    working set) and ~2.2 h. CUDA for comparison: HD × 60 in 85 s.
+  - **M1 has no fast bf16:** MPS bf16 conv3d 0.40 TFLOPS vs fp32 0.92 and fp16 4.74 (fp16
+    overflows to NaN in the VAE encoder, even with PixelNorm in fp32); matmul bf16 8.9, fp16 16.4,
+    fp32 13.0 TFLOPS. So on MPS the worker encodes the reference in **fp32** (injection 6,
+    `ReferenceEncoderInDtype`): 285 → 126 s at 720p × 49, same matte. The transformer stays bf16
+    (fp16 there is a possible later speed-up, with overflow risk).
+  - **bf16 only:** MPS has no fp8 dtype (`Undefined type Float8_e4m3fn`). The Mac default is bf16;
+    fp8 selected on a Mac is refused at Process with a message (decision 34: no silent downgrade).
+  - **Memory model** (`vram_estimate`, `mps` flag): need = 44.5 + 0.231 GB per Mpx·frame + 1,
+    fitted to the three runs above (peak = lowest free working set). Free memory on the Mac =
+    min(working set, available RAM) (`platform_macos_metal.mm`), so Auto picks Half or Quarter
+    there. Over-committing Metal swaps instead of raising an OOM; the warning text says so. The
+    resident-transformer case is not measured on MPS (UNVERIFIED).
+  - **job.py runs under the runtime's Python on macOS** (`ltx_python`): the system python3 of the
+    Command Line Tools has no numpy. Setup still runs under the system python3 (stdlib only).
+  - **mps-sdpa's compiled bridge is not needed:** it builds only with `ninja` on PATH and then
+    fails on this Mac's stale Command Line Tools C++ headers, but its fallback is as fast (255 ms
+    per 12.9k-token attention call either way).
 
 ## Architecture (as built)
 
@@ -260,7 +326,8 @@ Flame Python hook: polls refresh markers → steps the current frame and back
 - `ofx/src/vram_estimate.*`: the memory model (decision 34/56).
 - `ofx/src/platform.h` (decision 64): `platform_linux.cpp` (staging in /dev/shm, /proc, zenity
   licence window) and `platform_linux_nvml.cpp` (NVML via dlopen; device and per-process memory).
-- `ofx/src/log.*`, `env_info.*`, `marker.*` (marker + overlay), `user_config.*`, `half.h` (F16C).
+- `ofx/src/log.*`, `env_info.*`, `marker.*` (marker + overlay), `user_config.*`, `half.h` (F16C;
+  NEON on ARM64).
 - `worker/job.py`: the detached job controller (resident/subprocess channels, progress Tracker,
   VRAM record, refresh marker). Manifest: `job_id node_id input width height frames chunks
   contrib frame_keys cache_root worker [worker_python worker_args worker_socket model_dir unload
@@ -425,6 +492,9 @@ process per run incl. model load, Gemma loaded and freed in process):
     `video_tools` kwarg (ARG002);
   - `ltx_pipelines.utils.samplers.tqdm` → a stepping wrapper that reports each denoising step (the
     loop has no callback; `samplers.py:72`).
+  - MPS only: `pipeline.image_conditioner` → `ReferenceEncoderInDtype(float32)` (decision 65).
+- Device: CUDA or MPS through `Accel` (memory queries, peaks sampled on MPS, the OOM type
+  `torch.OutOfMemoryError` for both).
 - Modes: one-shot (`--in/--chunks/--out-prefix`, used by the smoke tools), `--serve SOCKET`
   (resident server) and `--build-embeddings` (child process).
 - Input colour via `colour.Converter` before padding (decision 54).
@@ -494,6 +564,19 @@ process per run incl. model load, Gemma loaded and freed in process):
   shows the uv cache's growth against `uv_cache_bytes` (6.6 GB, measured). The watcher also
   catches Cancel while uv is silent. Network steps retry twice (PyPI and GitHub release assets
   have timed out). Errors show uv's `error:` + last `cause:` line, not its trailing `hint:`.
+- **macOS (decision 65):** the manifest's `uv` has one entry per `sys.platform` (darwin:
+  `uv-aarch64-apple-darwin.tar.gz`); `runtime.uv_cache_bytes_darwin` drives the bar (1.4 GB; a
+  darwin sync left 1.3 GB). Same `uv sync` command (every entry of the `natten` extra in
+  `helper/ltx2-uv.lock` carries `sys_platform == 'linux'`, so it adds nothing; darwin gets torch
+  2.14.1 from PyPI, Linux 2.13.0+cu132). The
+  smoke test asserts `torch.backends.mps.is_available()`. Instead of gcc, Setup requires the
+  Command Line Tools (`xcrun --find clang++`): no Triton on macOS, but `mps-sdpa` builds its
+  Objective-C++ bridge on first use (torch `cpp_extension`: clang++, Python.h, and **ninja found
+  on PATH**, else it falls back to its pyobjc MPSGraph path, `backends/mpsgraph_zc.py:43-55`), and the progress window is Swift.
+  The lockfile installs ninja into the venv's `bin/`, but torch looks for it on PATH only
+  (`torch/utils/cpp_extension.py:2561-2568`, `subprocess.check_output(['ninja', '--version'])`)
+  and nothing puts the venv's `bin/` on the worker's PATH, so as built the worker probably takes
+  the fallback (UNVERIFIED in a real run; the fix would be in whatever starts the worker).
 - Trailing `/` in folder params is stripped (".../models/" would otherwise look like another
   folder and restart the worker).
 - **Plugin Setup tab:** Licence column; Models column = Model Folder, Existing Models, status;
@@ -534,6 +617,17 @@ process per run incl. model load, Gemma loaded and freed in process):
   - `posix_spawn` needs absolute paths;
   - workers run as `python -I -B`, so dependencies must be in the interpreter's own site-packages;
   - `-DLTXAG_GIT=<hash>` sets the build hash when building from a copy without `.git`.
+- **macOS build facts** (Apple Silicon, Command Line Tools: Apple clang 17, MacOSX 26.2 SDK,
+  cmake 4.4; `HOST=… REMOTE=… CMAKE=… scripts/build_mac.sh`):
+  - bundle binary in `Contents/MacOS/LTXAlphaGen.ofx` (arm64 Mach-O bundle, minos 15.0), as the
+    installed Mac OFX plugins use; a minimal `Contents/Info.plist` is generated (most installed
+    plugins carry one; whether Flame needs it is UNVERIFIED);
+  - exports via `-Wl,-exported_symbols_list` with the vendored `Support/include/osxSymbols`;
+    ld's default `-undefined error` replaces `--no-undefined`; links Metal + Foundation, libc++,
+    libobjc, libSystem only; the linker signs it ad hoc (no real signing/notarisation yet);
+  - a CLT install with a stale `usr/include/c++/v1` hides the SDK's libc++ headers (`'string'
+    file not found`): pass `-stdlib++-isystem <SDK>/usr/include/c++/v1` in
+    `CMAKE_CXX_FLAGS`/`CMAKE_OBJCXX_FLAGS` (via `CMAKE_ARGS`).
 - **Tests (ctest, 8):** `chunk_plan` (all sizes, linear and smooth), `roi` (box math and channel
   choice), `worker_python` (padding, transport, job incl. the progress Tracker, the VRAM CSV and
   the refresh marker, the ROI paste-back and flow-merge paths, `test_morph`, the Flame hook against
@@ -562,7 +656,9 @@ process per run incl. model load, Gemma loaded and freed in process):
 - An offline install of the Python packages (decision 57).
 - Optional: an A/B of recipe 2 (`alpha_gen.py`: dev transformer, 30 steps; its negative prompt is
   unused at cfg 1.0) on hair/smoke; carrying the previous chunk's matte as conditioning for seams.
-- A macOS / MLX port is being considered (`ofx/TODO.md`).
+- **macOS / MLX port** (branch `macos-mlx`): written from scratch in MLX, no community port code
+  (user, 2026-10-12: learning, and one licence set, LTX's). The map of what has to be ported is
+  `mlx/PORT_MAP.md` (code paths at `9ec55f9`, weights, sizes, speed estimate, risks).
 
 ## Dead ends: don't retry
 

@@ -2,7 +2,11 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#else
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -40,6 +44,18 @@ bool parseLevel(const std::string& s, LogLevel& out) {
   else if (s == "error") out = LogLevel::Error;
   else return false;
   return true;
+}
+
+// The OS thread id, as Python's threading.get_native_id() reports it. macOS: SYS_gettid is a
+// different call there (per-thread credentials), so pthread_threadid_np (pthread.h).
+long threadId() {
+#if defined(__APPLE__)
+  uint64_t tid = 0;
+  pthread_threadid_np(nullptr, &tid);
+  return long(tid);
+#else
+  return long(syscall(SYS_gettid));
+#endif
 }
 }  // namespace
 
@@ -93,7 +109,7 @@ void logAt(LogLevel level, const char* fmt, ...) {
                               "%04d-%02d-%02d %02d:%02d:%02d.%03d %s ofx[%d/%ld] node=%s job=%s | %s\n",
                               tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
                               tm.tm_sec, ms, levelName(level), int(getpid()),
-                              long(syscall(SYS_gettid)), tNode.c_str(), tJob.c_str(), msg);
+                              threadId(), tNode.c_str(), tJob.c_str(), msg);
   if (n <= 0) return;
 
   // One O_APPEND write per line: whole lines stay intact across processes.

@@ -9,8 +9,8 @@ using namespace ltxag;
 static int failures = 0;
 
 static void covers(const char* what, bool fp8, int w, int h, int f, bool resident, double measured,
-                   double maxOver) {
-  const VramNeed n = estimateVramNeed(fp8, w, h, f, resident);
+                   double maxOver, bool mps = false) {
+  const VramNeed n = estimateVramNeed(fp8, w, h, f, resident, mps);
   const bool ok = n.gb >= measured && n.gb - measured <= maxOver;
   std::printf("%s %-34s est %5.1f GB vs measured %5.1f GB (model %dx%dx%d)\n", ok ? "ok  " : "FAIL", what, n.gb,
               measured, n.modelW, n.modelH, n.modelFrames);
@@ -33,6 +33,10 @@ int main() {
   covers("A/B HD 145 fp8 resident, chunk 2", true, 1920, 1080, 145, true, 56.2 + 0.7, 4.0);
   covers("test 2: 720p 57 bf16 resident reused", false, 1280, 720, 50, true, 44.2, 4.0);
   covers("test 2: 720p 57 fp8 resident fresh", true, 1280, 720, 50, true, 28.0, 4.0);
+  // Apple Silicon, M1 Ultra, our worker (decision 65): lowest free working set.
+  covers("mps 720p 49 bf16", false, 1280, 720, 49, false, 52.3, 4.0, true);
+  covers("mps HD 33 bf16", false, 1920, 1080, 33, false, 60.4, 4.0, true);
+  covers("mps HD 73 bf16", false, 1920, 1080, 73, false, 79.7, 4.0, true);
   // Padding: 1080 -> 1088, 60 -> 65 frames, frames capped at the chunk length 145.
   const VramNeed p = estimateVramNeed(true, 1920, 1080, 300, false);
   if (p.modelH != 1088 || p.modelFrames != 145) {

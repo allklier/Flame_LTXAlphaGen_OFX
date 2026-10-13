@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cache.h"
+#include "half.h"
 #include "platform.h"
 #include "transport.h"
 
@@ -128,6 +129,41 @@ int main() {
   CHECK(!exists(jobDead + "_in.bin"), "dead job input kept");
   for (const auto& p : {liveFile, jobLive + "_in.bin", jobLive + ".pid", jobDead + ".pid"})
     unlink(p.c_str());
+
+  // Half conversion (half.h, F16C or NEON): exact values, round to nearest even, vector + tail.
+  const float fs[] = {0.0f,        1.0f, -2.0f, 0.5f, 65504.0f, 1.0f / 3.0f,
+                      1.0f + 3.0f / 2048.0f /* tie */, 0.25f, 3.0f};
+  const uint16_t hs[] = {0x0000, 0x3c00, 0xc000, 0x3800, 0x7bff, 0x3555, 0x3c02, 0x3400, 0x4200};
+  uint16_t hOut[9];
+  float fOut[9];
+  floatToHalf(fs, hOut, 9);
+  halfToFloat(hs, fOut, 9);
+  for (int i = 0; i < 9; ++i) {
+    CHECK(hOut[i] == hs[i], "floatToHalf[%d] = 0x%04x", i, hOut[i]);
+    CHECK(i == 5 || i == 6 || fOut[i] == fs[i], "halfToFloat[%d] = %g", i, fOut[i]);
+  }
+
+  // Frame file space is reserved at open (posix_fallocate / F_PREALLOCATE + ftruncate).
+  {
+    StagingFile sf("t");
+    FrameWriter fw;
+    std::string err;
+    CHECK(fw.open(sf.path(), 4, 2, 3, err), "FrameWriter open: %s", err.c_str());
+    struct stat fst {};
+    CHECK(stat(sf.path().c_str(), &fst) == 0 &&
+              fst.st_size == off_t(sizeof(FrameFileHeader) + 4 * 2 * 3 * 2 * 3),
+          "staging file size %lld", (long long)fst.st_size);
+    fw.close();
+  }
+#if defined(__APPLE__)
+  {
+    StagingFile sf("big");  // ~1.5 PB: must fail at open, not while writing frames
+    FrameWriter fw;
+    std::string err;
+    CHECK(!fw.open(sf.path(), 65535, 65535, 65535, err), "huge reservation succeeded");
+    fw.close();
+  }
+#endif
 
   if (std::system(("rm -rf " + root).c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
   if (failures) {

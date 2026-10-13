@@ -1,6 +1,7 @@
 // Everything that differs between operating systems (decision 64). The rest of the plugin is
 // portable POSIX/OFX code and calls only these. Linux: platform_linux.cpp and
-// platform_linux_nvml.cpp, selected in CMakeLists.txt.
+// platform_linux_nvml.cpp; macOS: platform_macos.cpp and platform_macos_metal.mm; selected in
+// CMakeLists.txt.
 #pragma once
 
 #include <string>

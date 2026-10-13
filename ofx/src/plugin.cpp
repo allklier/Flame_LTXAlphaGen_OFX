@@ -131,7 +131,7 @@ constexpr const char* kTokenCaptionDefault = "Hugging Face token:";
 std::string resourcesDir() {
   Dl_info info{};
   if (!dladdr(reinterpret_cast<void*>(&resourcesDir), &info) || !info.dli_fname) return "";
-  std::string p = info.dli_fname;  // .../Contents/Linux-x86-64/LTXAlphaGen.ofx
+  std::string p = info.dli_fname;  // .../Contents/{Linux-x86-64,MacOS}/LTXAlphaGen.ofx
   p = p.substr(0, p.rfind('/'));
   p = p.substr(0, p.rfind('/'));
   return p + "/Resources";
@@ -229,13 +229,21 @@ struct Defaults {
   std::string source;
 };
 
+// Apple Silicon runs the model on PyTorch-MPS (decision 65): bf16 only (MPS has no fp8 dtype)
+// and its own memory model (vram_estimate.h).
+#ifdef __APPLE__
+constexpr bool kMps = true;
+#else
+constexpr bool kMps = false;
+#endif
+
 Defaults computeDefaults() {
   Defaults d;
   const VramInfo v = queryVram();
   d.headroomGB = v.ok ? std::round(v.freeGB * 0.05 * 10.0) / 10.0 : 2.0;
   const double bf16Need =
-      estimateVramNeed(false, kDefaultCheckW, kDefaultCheckH, kDefaultCheckFrames, false).gb;
-  d.precision = (v.ok && v.freeGB - d.headroomGB < bf16Need) ? 1 : 0;
+      estimateVramNeed(false, kDefaultCheckW, kDefaultCheckH, kDefaultCheckFrames, false, kMps).gb;
+  d.precision = (!kMps && v.ok && v.freeGB - d.headroomGB < bf16Need) ? 1 : 0;
   std::string src = v.ok ? "built-in (free " + fmtGB(v.freeGB) + " of " + fmtGB(v.totalGB) + " GB)"
                          : "built-in (GPU memory unavailable)";
   const UserConfig cfg = loadUserConfig();
@@ -834,7 +842,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     unsigned pid = 0;
     const double available = v.freeGB + residentWorkerGB(pid) - head;
     for (int s = 0; s < kChunkSizes; ++s) {
-      const double need = estimateVramNeed(fp8, w, h, std::min(kSizeLen[s], frames), resident).gb;
+      const double need = estimateVramNeed(fp8, w, h, std::min(kSizeLen[s], frames), resident, kMps).gb;
       LOGI("chunk size auto: %d frames/chunk needs %.1f GB, available %.1f GB", kSizeLen[s], need, available);
       if (need <= available) return s;
     }
@@ -851,7 +859,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     simNeed_->getValue(simNeed);
     int longest = 0;
     for (const auto& c : chunks) longest = std::max(longest, c.len);
-    const VramNeed est = estimateVramNeed(prec == 1, w, h, longest, !unload);
+    const VramNeed est = estimateVramNeed(prec == 1, w, h, longest, !unload, kMps);
     const double need = simNeed > 0.0 ? simNeed : est.gb;
     const VramInfo v = queryVram();
     unsigned workerPid = 0;
@@ -889,8 +897,10 @@ class AlphaGenEffect : public OFX::ImageEffect {
       msg += " - " + fmtGB(head) + " GB reserved for Flame.\nIn use on the " + fmtGB(v.totalGB) +
              " GB GPU: Flame " + fmtGB(flame) + " GB, other apps " + fmtGB(others) + " GB" +
              (list.empty() ? "" : " (" + list + ")") + ".\n\nThe estimate is conservative, so it may " +
-             "still work; if not, the job stops with an out-of-memory error and Flame is not affected." +
-             (prec == 0 ? " fp8 needs about 17 GB less." : "") + "\n\nProcess anyway?";
+             (kMps ? "still work; if not, macOS swaps memory to disk and the job (and the Mac) slows down "
+                     "badly. A smaller Chunk Size needs less."  // Metal over-commit swaps (devices.py)
+                   : "still work; if not, the job stops with an out-of-memory error and Flame is not affected.") +
+             (!kMps && prec == 0 ? " fp8 needs about 17 GB less." : "") + "\n\nProcess anyway?";
       const OFX::Message::MessageReplyEnum reply = sendMessage(OFX::Message::eMessageQuestion, "", msg);
       LOGI("preflight: warning shown, reply %d (0 OK, 1 Yes, 2 No, 3 Failed)", int(reply));
       if (reply == OFX::Message::eMessageReplyNo) return false;
@@ -943,6 +953,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
     bool unload = true;
     double head = 0.0;
     precision_->getValue(prec);
+    if (kMps && prec == 1)  // decision 34: no silent downgrade
+      return error("fp8 is not available on Apple Silicon (MPS has no fp8 type): set Precision to bf16.");
     unload_->getValue(unload);
     headroom_->getValue(head);
     chunkSize_->getValue(chunkMode);
@@ -1086,8 +1098,16 @@ class AlphaGenEffect : public OFX::ImageEffect {
     setIfChanged(roiInfo_, useRoi ? "Crop " + std::to_string(roi.box.w) + "x" + std::to_string(roi.box.h)
                                   : std::string("None (alpha opaque)"));
     markPending(root, keys, getpid());
+    // job.py needs numpy: the system python3 has it on Rocky 9 but not on macOS, where the job
+    // runs under the LTX runtime's own Python (decision 65; Setup is stdlib-only and keeps
+    // pythonPath()).
+#ifdef __APPLE__
+    const std::string jobPython = ltxPython.empty() ? pythonPath() : ltxPython;
+#else
+    const std::string jobPython = pythonPath();
+#endif
     const bool ok = launchDetached(
-        {pythonPath(), "-I", "-B", resourcesDir() + "/worker/job.py", manifest},
+        {jobPython, "-I", "-B", resourcesDir() + "/worker/job.py", manifest},
         cleanEnvironment({"LTXAG_LOG_LEVEL=" + level}), err);
     if (!ok) {
       clearPending(root, keys);
@@ -1100,7 +1120,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
       lastJobId_ = jobId;
     }
     setIfChanged(status_, "Processing " + std::to_string(n) + " frames");
-    LOGI("process: job launched (job python %s, worker %s)", pythonPath().c_str(),
+    LOGI("process: job launched (job python %s, worker %s)", jobPython.c_str(),
          useDummy() ? "dummy" : ltxPython.c_str());
     startWatcher(jobId, root, keys);
   }

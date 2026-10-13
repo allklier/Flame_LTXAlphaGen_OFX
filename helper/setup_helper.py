@@ -1,7 +1,8 @@
 """Setup: install the LTX runtime and the models, then mark the user's setup ready.
 
 Launched detached by the plugin's Download button (Setup tab). Standard library only: it runs
-with the system python3 (Rocky 9: 3.9) before any venv exists.
+with the system python3 (Rocky 9: 3.9, macOS: 3.9 from the Command Line Tools) before any venv
+exists.
 
   python3 -I -B setup_helper.py --model-dir D --cache-root R [--existing E] [--no-ui]
   HF_TOKEN in the environment (decision 13: never on argv, never stored). Only needed when a
@@ -10,6 +11,8 @@ with the system python3 (Rocky 9: 3.9) before any venv exists.
 Steps (decisions 2/7/9/13/20/51), all pinned by model_manifest.json next to this file:
   1 runtime   <D>/runtime: uv (SHA-256 verified), LTX-2 source at the pinned commit,
               `uv sync --frozen --no-dev --extra natten`, extra wheels (OpenColorIO), CUDA smoke test
+              (macOS: the darwin uv build and an MPS smoke test; the natten extra is Linux-only in
+              the lockfile's markers, so it installs nothing there)
   2 models    for each file: already in <D> and verified -> keep; found by exact name under
               --existing and verified -> COPY (hashing while copying); else download from HF
               (hashing while downloading). Verification = size + SHA-256 from the manifest.
@@ -272,7 +275,18 @@ def _run_once(cmd: list[str], env: dict, label: str, prog: Progress, frac: float
 
 def find_c_compiler() -> str:
     """What Triton will use to build its small C helpers at run time ($CC, else gcc, else clang;
-    triton/runtime/build.py:26-30). Empty if there is none."""
+    triton/runtime/build.py:26-30). Empty if there is none.
+    macOS: no Triton (Linux-only in the lockfile); mps-sdpa compiles its Objective-C++ bridge on
+    first use (mps_sdpa/_cpp/__init__.py, torch cpp_extension: clang++ + ninja) and the progress
+    window is Swift (ltxag_worker/oslayer.py), so the Command Line Tools are required. /usr/bin/clang
+    is a stub even without them; xcrun finds the real tool or fails (man xcode-select)."""
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["/usr/bin/xcrun", "--find", "clang++"], capture_output=True, text=True,
+                               timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
     return os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or ""
 
 
@@ -285,12 +299,13 @@ def install_runtime(man: dict, rt: str, prog: Progress) -> str:
     os.makedirs(f"{rt}/bin", exist_ok=True)
     uv = f"{rt}/bin/uv"
     u = man["uv"]
+    asset = u[sys.platform]  # "linux" or "darwin"
     if not (os.path.exists(uv) and subprocess.run([uv, "--version"], capture_output=True, text=True)
             .stdout.split()[1:2] == [u["version"]]):
         prog.update(0.01, f"runtime: downloading uv {u['version']}")
         tgz = f"{rt}/bin/uv.tar.gz"
-        with urllib.request.urlopen(u["url"], timeout=60) as resp:
-            stream_copy(resp, tgz, u["size"], u["sha256"], prog, "uv", 0.01, 0.02)
+        with urllib.request.urlopen(asset["url"], timeout=60) as resp:
+            stream_copy(resp, tgz, asset["size"], asset["sha256"], prog, "uv", 0.01, 0.02)
         with tarfile.open(tgz) as t:
             for member in t.getmembers():
                 if os.path.basename(member.name) in ("uv", "uvx") and member.isfile():
@@ -326,12 +341,22 @@ def install_runtime(man: dict, rt: str, prog: Progress) -> str:
     # uv's own Python at the tested version, never a system one: LTX-2 only asks for >= 3.10, so a
     # system Python 3.12 got used on one user's machine, and its missing headers (no -devel
     # package) broke Triton's C build at the prompt cache step. uv's Python ships its headers.
+    cache_bytes = man["runtime"]["uv_cache_bytes_darwin" if sys.platform == "darwin" else "uv_cache_bytes"]
     run([uv, "sync", "--frozen", "--no-dev", "--extra", "natten", "--managed-python",
          "--python", man["runtime"]["python"]], env, "runtime: Python packages",
-        prog, 0.05, cwd=src, retries=2, watch=(f"{rt}/uv-cache", man["runtime"]["uv_cache_bytes"], 0.08))
+        prog, 0.05, cwd=src, retries=2, watch=(f"{rt}/uv-cache", cache_bytes, 0.08))
     py = f"{src}/.venv/bin/python"
     run([uv, "pip", "install", "--python", py, *man["pip_extra"]], env, "runtime: installing OpenColorIO",
         prog, 0.08, retries=2)
+    if sys.platform == "darwin":  # decision 65: PyTorch-MPS; the check touches no GPU memory
+        run([py, "-I", "-B", "-c",
+             "import os, sys, sysconfig, torch, PyOpenColorIO, ltx_pipelines.ic_lora; "
+             "assert torch.backends.mps.is_available(), 'no MPS'; "
+             "h = os.path.join(sysconfig.get_paths()['include'], 'Python.h'); "
+             "assert os.path.exists(h), 'no Python headers at ' + h + ' (mps-sdpa needs them)'; "
+             "print(sys.version.split()[0], torch.__version__, 'MPS')"],
+            env, "runtime: checking Python, torch + MPS", prog, 0.09)
+        return py
     run([py, "-I", "-B", "-c",
          "import os, sys, sysconfig, torch, PyOpenColorIO, ltx_pipelines.ic_lora; "
          "assert torch.cuda.is_available(), 'no CUDA'; "
@@ -430,6 +455,10 @@ def main() -> int:
     t0 = time.time()
     try:
         cc = find_c_compiler()
+        if not cc and sys.platform == "darwin":
+            raise SetupError("The Apple Command Line Tools are missing. The GPU code compiles a small "
+                             "helper while it runs, so they are needed: run xcode-select --install in "
+                             "Terminal. Then press Download again.")
         if not cc:  # before any download: the prompt cache step would fail after ~80 GB otherwise
             raise SetupError("No C compiler found. The GPU code (Triton) compiles small helpers while it "
                              "runs, so gcc is needed: sudo dnf install gcc. Then press Download again.")

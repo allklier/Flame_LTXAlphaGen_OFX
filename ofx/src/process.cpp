@@ -18,7 +18,12 @@ namespace {
 
 const char* const kStripped[] = {"PYTHONHOME=",    "PYTHONPATH=",  "PYTHONSTARTUP=",
                                  "PYTHONUSERBASE=", "LD_LIBRARY_PATH=", "LD_PRELOAD=",
-                                 "HF_TOKEN="};
+                                 "HF_TOKEN=",
+#if defined(__APPLE__)
+                                 "DYLD_LIBRARY_PATH=", "DYLD_INSERT_LIBRARIES=",
+                                 "DYLD_FRAMEWORK_PATH=",
+#endif
+};
 
 std::vector<char*> cstrs(const std::vector<std::string>& v) {
   std::vector<char*> out;
@@ -26,6 +31,31 @@ std::vector<char*> cstrs(const std::vector<std::string>& v) {
   out.push_back(nullptr);
   return out;
 }
+
+// macOS has neither pipe2 nor posix_spawn_file_actions_addclosefrom_np (checked in the
+// MacOSX.sdk unistd.h and spawn.h). There, pipes get FD_CLOEXEC by fcntl, and the Darwin flag
+// POSIX_SPAWN_CLOEXEC_DEFAULT (sys/spawn.h; man posix_spawnattr_setflags: only the fds created
+// by the file actions reach the child) replaces closefrom.
+int cloexecPipe(int fds[2]) {
+#if defined(__APPLE__)
+  if (pipe(fds) != 0) return -1;
+  fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+  return 0;
+#else
+  return pipe2(fds, O_CLOEXEC);
+#endif
+}
+
+#if defined(__APPLE__)
+constexpr short kCloseOthers = POSIX_SPAWN_CLOEXEC_DEFAULT;
+void closeFrom(posix_spawn_file_actions_t*, int) {}
+#else
+constexpr short kCloseOthers = 0;
+void closeFrom(posix_spawn_file_actions_t* fa, int lowFd) {
+  posix_spawn_file_actions_addclosefrom_np(fa, lowFd);
+}
+#endif
 
 // Shared spawn setup: default signal dispositions, empty mask, no inherited fds.
 struct SpawnSetup {
@@ -39,7 +69,8 @@ struct SpawnSetup {
     sigfillset(&all);
     posix_spawnattr_setsigmask(&attr, &none);
     posix_spawnattr_setsigdefault(&attr, &all);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | extraFlags);
+    posix_spawnattr_setflags(&attr,
+                             POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | kCloseOthers | extraFlags);
   }
   ~SpawnSetup() {
     posix_spawn_file_actions_destroy(&fa);
@@ -73,7 +104,7 @@ WorkerProcess::~WorkerProcess() {
 bool WorkerProcess::start(const std::vector<std::string>& argv, const Env& env,
                           std::string& err) {
   int out[2], in[2];
-  if (pipe2(out, O_CLOEXEC) != 0 || pipe2(in, O_CLOEXEC) != 0) {
+  if (cloexecPipe(out) != 0 || cloexecPipe(in) != 0) {
     err = std::string("pipe: ") + std::strerror(errno);
     return false;
   }
@@ -82,7 +113,7 @@ bool WorkerProcess::start(const std::vector<std::string>& argv, const Env& env,
   posix_spawn_file_actions_adddup2(&s.fa, in[0], 0);
   posix_spawn_file_actions_adddup2(&s.fa, out[1], 1);
   posix_spawn_file_actions_adddup2(&s.fa, out[1], 2);
-  posix_spawn_file_actions_addclosefrom_np(&s.fa, 3);
+  closeFrom(&s.fa, 3);
 
   auto args = cstrs(argv);
   auto envp = cstrs(env);
@@ -144,7 +175,7 @@ bool launchDetached(const std::vector<std::string>& argv, const Env& env, std::s
                                      "\"$0\" \"$@\" </dev/null >/dev/null 2>&1 &"};
   shArgv.insert(shArgv.end(), argv.begin(), argv.end());
   SpawnSetup s(POSIX_SPAWN_SETSID);
-  posix_spawn_file_actions_addclosefrom_np(&s.fa, 0);
+  closeFrom(&s.fa, 0);
   auto args = cstrs(shArgv);
   auto envp = cstrs(env);
   pid_t pid = -1;

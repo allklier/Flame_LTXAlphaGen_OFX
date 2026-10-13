@@ -40,7 +40,8 @@ class StagingFile {
 // Sequential writer for the input file: header, then one frame at a time.
 class FrameWriter {
  public:
-  // Reserves the full size up front (posix_fallocate) so lack of RAM shows up here.
+  // Reserves the full size up front (posix_fallocate; macOS F_PREALLOCATE) so lack of space
+  // shows up here.
   bool open(const std::string& path, uint32_t w, uint32_t h, uint32_t n, std::string& err);
   bool writeFrame(const uint16_t* halfRGB, std::string& err);  // w*h*3 halves, rows top-down
   void close();

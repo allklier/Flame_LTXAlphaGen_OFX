@@ -26,12 +26,20 @@ LoRA 1.0. Injections into the pinned LTX-2 code (commit 9ec55f9):
     the single-GPU Builder.build ignores the per-call video_tools kwarg (ARG002);
   - pipeline.audio_decoder = None: video-only chunks (chunks/operators.py:285), saving ~2 s/chunk;
   - samplers.tqdm -> a stepping wrapper that reports each denoising step (there is no callback;
-    euler_denoising_loop iterates tqdm(sigmas[:-1]), utils/samplers.py:72).
+    euler_denoising_loop iterates tqdm(sigmas[:-1]), utils/samplers.py:72);
+  - MPS only: pipeline.image_conditioner -> ReferenceEncoderInDtype(float32). M1 has no fast
+    bf16: a bf16 conv3d runs at 0.40 TFLOPS vs 0.92 fp32 (4.7 fp16, which overflows to NaN in
+    this encoder), so the reference encode took 285 s of a 887 s 720p x 49 job. The latent goes
+    back to bf16 for the rest of the pipeline.
 Progress lines (besides info/chunk_done/done/error): "stage <chunk> <name>" (converting,
 preparing, denoising, decoding), "step <chunk> <k> <n>" after each denoising step, and at the
 end "vram <min_free_gb> <peak_alloc_gb> <peak_reserved_gb> <reserved_at_start_gb> <torch>": the lowest
-free device memory sampled during the job (cudaMemGetInfo, every 0.25 s), for comparing the
-plugin's estimate with what the job really took.
+free device memory sampled during the job (every 0.25 s), for comparing the plugin's estimate
+with what the job really took.
+Device (decision 65): CUDA on Linux, MPS (Apple Silicon) on macOS, through Accel. On MPS "free"
+is Metal's recommended working set minus what this process holds (as upstream's
+ltx_core/devices.py:mps_activation_budget_bytes), and the peaks are sampled: torch.mps has no
+peak statistics.
   A ModelRegistry(cache_weights=True) was tried first and was worse (chunk 1 200 s, +16 GB).
 Frames arrive in the source colour space as float16; colour.Converter maps them to Rec.1886
 display values (decision 54), then they are scaled to [0,255] floats like the pipeline's reader.
@@ -67,6 +75,63 @@ IDLE_TIMEOUT_DEFAULT = 300.0  # decision 33
 log = Logger("worker")
 
 
+class Accel:
+    """The GPU this worker runs on: CUDA (Linux) or MPS (macOS, decision 65). Memory in GB."""
+
+    def __init__(self, torch) -> None:  # noqa: ANN001 - the torch module
+        self.torch = torch
+        if torch.cuda.is_available():
+            self.kind = "cuda"
+        elif torch.backends.mps.is_available():
+            self.kind = "mps"
+        else:
+            raise RuntimeError("no CUDA or MPS GPU is available to the worker")
+        self.device = torch.device(self.kind)
+        self.peak = [0.0, 0.0]  # MPS only: sampled allocated, reserved
+
+    def describe(self) -> str:
+        t = self.torch
+        if self.kind == "cuda":
+            return f"torch {t.__version__} cuda {t.version.cuda} gpu {t.cuda.get_device_name(0)}"
+        return f"torch {t.__version__} mps, recommended working set {t.mps.recommended_max_memory() / 2**30:.1f} GB"
+
+    def empty_cache(self) -> None:
+        (self.torch.cuda if self.kind == "cuda" else self.torch.mps).empty_cache()
+
+    def reserved_gb(self) -> float:
+        t = self.torch
+        return (t.cuda.memory_reserved() if self.kind == "cuda" else t.mps.driver_allocated_memory()) / 2**30
+
+    def allocated_gb(self) -> float:
+        t = self.torch
+        return (t.cuda.memory_allocated() if self.kind == "cuda" else t.mps.current_allocated_memory()) / 2**30
+
+    def free_gb(self) -> float:
+        t = self.torch
+        if self.kind == "cuda":
+            return t.cuda.mem_get_info()[0] / 2**30
+        return (t.mps.recommended_max_memory() - t.mps.driver_allocated_memory()) / 2**30
+
+    def sample(self) -> float:
+        """Free memory now; on MPS also updates the sampled peaks."""
+        if self.kind == "mps":
+            self.peak = [max(self.peak[0], self.allocated_gb()), max(self.peak[1], self.reserved_gb())]
+        return self.free_gb()
+
+    def reset_peaks(self) -> None:
+        if self.kind == "cuda":
+            self.torch.cuda.reset_peak_memory_stats()
+        else:
+            self.peak = [self.allocated_gb(), self.reserved_gb()]
+
+    def peaks_gb(self) -> tuple[float, float]:
+        t = self.torch
+        if self.kind == "cuda":
+            return t.cuda.max_memory_allocated() / 2**30, t.cuda.max_memory_reserved() / 2**30
+        self.sample()
+        return self.peak[0], self.peak[1]
+
+
 class Cancelled(Exception):
     """The client went away mid-job."""
 
@@ -91,6 +156,31 @@ class MemoryFrameSource:
 
     def close(self) -> None:
         pass
+
+
+class ReferenceEncoderInDtype:
+    """Stands in for ImageConditioner (blocks.py:948): builds the reference video encoder in
+    another dtype and casts frames in / latents out, so the rest of the pipeline is unchanged."""
+
+    class _Cast:
+        def __init__(self, enc, dtype) -> None:  # noqa: ANN001
+            self.enc, self.dtype = enc, dtype
+
+        def __call__(self, video):  # noqa: ANN001
+            return self.enc(video.to(self.dtype)).to(video.dtype)
+
+        def __getattr__(self, name: str):
+            return getattr(self.enc, name)
+
+    def __init__(self, inner, dtype) -> None:  # noqa: ANN001 - ImageConditioner, torch.dtype
+        inner._dtype = dtype  # the dtype its Builder builds the encoder in (blocks.py:998)
+        self.inner, self.dtype = inner, dtype
+
+    def resolve_crf(self, images):  # noqa: ANN001
+        return self.inner.resolve_crf(images)
+
+    def __call__(self, fn):  # noqa: ANN001
+        return self.inner(lambda enc: fn(ReferenceEncoderInDtype._Cast(enc, self.dtype)))
 
 
 class CachedPromptEncoder:
@@ -140,7 +230,7 @@ def build_embeddings(path: str, transformer: str, text_encoder: str, video_vae: 
     t0 = time.time()
     model_paths = ModelPaths.from_split(transformer_path=transformer, text_encoder_path=text_encoder,
                                         video_vae_path=video_vae)
-    encoder = PromptEncoder(model_paths, torch.bfloat16, torch.device("cuda"))
+    encoder = PromptEncoder(model_paths, torch.bfloat16, Accel(torch).device)
     with torch.inference_mode():
         (out,) = encoder([""])
     tensors = {"video_encoding": out.video_encoding, "attention_mask": out.attention_mask}
@@ -171,12 +261,11 @@ class Engine:
         from ltx_pipelines.utils.quantization_factory import QuantizationKind
 
         self.torch = torch
+        self.accel = Accel(torch)
         self.model_dir, self.precision = model_dir, precision
         self.frames_on_gpu = frames_on_gpu  # A/B only: the pre-2026-10-11 behaviour
         t0 = time.time()
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available to the worker")
-        emit("info", f"torch {torch.__version__} cuda {torch.version.cuda} gpu {torch.cuda.get_device_name(0)}")
+        emit("info", self.accel.describe())
         paths = model_paths_for(model_dir)
         missing = [k for k, p in paths.items() if not os.path.exists(p)]
         if missing:
@@ -194,6 +283,8 @@ class Engine:
             quantization=quant)
         self.pipeline.prompt_encoder = CachedPromptEncoder(embedding)  # injection 2
         self.pipeline.audio_decoder = None  # injection 4: video-only output
+        if self.accel.kind == "mps":  # injection 6: fp32 reference encode (M1 bf16 conv3d is slow)
+            self.pipeline.image_conditioner = ReferenceEncoderInDtype(self.pipeline.image_conditioner, torch.float32)
         self._on_step = lambda k, n: None
         self._install_step_hook()  # injection 5
         self._transformer, self._transformer_key = None, None
@@ -222,7 +313,7 @@ class Engine:
                 return contextlib.nullcontext(engine._transformer)
 
             blocks.DiffusionStage._transformer_ctx = resident_ctx
-        torch.cuda.empty_cache()
+        self.accel.empty_cache()
         emit("info", f"engine ready in {time.time() - t0:.1f} s (precision {precision}, "
                      f"transformer {'resident' if keep_transformer else 'rebuilt per chunk'})")
 
@@ -242,7 +333,7 @@ class Engine:
     def drop_transformer(self) -> None:
         """Free the resident transformer (after an OOM, so the next job starts clean)."""
         self._transformer, self._transformer_key = None, None
-        self.torch.cuda.empty_cache()
+        self.accel.empty_cache()
 
     def _load_or_build_embeddings(self, path: str, paths: dict, emit):
         from safetensors import safe_open
@@ -264,24 +355,24 @@ class Engine:
                                  "--video-vae", paths["video_vae"]], stdin=subprocess.DEVNULL).returncode
             if rc != 0 or not os.path.exists(path):
                 raise RuntimeError(f"building the prompt embedding cache failed (exit {rc})")
-        t = load_file(path, device="cuda")
+        t = load_file(path, device=self.accel.kind)
         emit("info", f"prompt embedding loaded from {path}")
         return EmbeddingsProcessorOutput(t["video_encoding"], t.get("audio_encoding"), t["attention_mask"])
 
     def vram_gb(self) -> float:
-        return self.torch.cuda.memory_reserved() / 2**30
+        return self.accel.reserved_gb()
 
     def run(self, inp: str, chunks, out_prefix: str, conv: colour.Converter, emit, seed: int = SEED_DEFAULT):
-        torch = self.torch
+        torch, accel = self.torch, self.accel
         emit("info", conv.describe())
-        reserved_start = torch.cuda.memory_reserved() / 2**30
+        reserved_start = accel.reserved_gb()
         self.job_peak = [0.0, 0.0]  # allocated, reserved: max over the chunks (peaks reset per chunk)
-        min_free = [torch.cuda.mem_get_info()[0] / 2**30]
+        min_free = [accel.free_gb()]
         sampling = threading.Event()
 
         def sample():
             while not sampling.wait(0.25):
-                min_free[0] = min(min_free[0], torch.cuda.mem_get_info()[0] / 2**30)
+                min_free[0] = min(min_free[0], accel.sample())
 
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
@@ -296,12 +387,12 @@ class Engine:
                      f"{reserved_start:.2f}", torch.__version__)
 
     def _run_chunks(self, inp, chunks, out_prefix, conv, emit, seed, min_free) -> None:  # noqa: ANN001
-        torch = self.torch
+        torch, accel = self.torch, self.accel
         for i, (start, length) in enumerate(chunks):
             label = f"chunk {i + 1}/{len(chunks)}"
             t0 = time.time()
-            torch.cuda.reset_peak_memory_stats()
-            alloc_start = torch.cuda.memory_allocated() / 2**30
+            accel.reset_peaks()
+            alloc_start = accel.allocated_gb()
             emit("stage", i, "converting" if conv.active else "preparing")
             frames = conv.apply(transport.read_frames_range(args_safe(inp), start, length))  # (n,h,w,3) f32
             n, h, w, _ = frames.shape
@@ -310,7 +401,7 @@ class Engine:
             np_, hp, wp = padded.shape[0], padded.shape[1], padded.shape[2]
             frames_t = torch.from_numpy(np.ascontiguousarray(padded))
             if self.frames_on_gpu:
-                frames_t = frames_t.to("cuda")
+                frames_t = frames_t.to(accel.device)
             MemoryFrameSource.frames = frames_t.clamp_(0.0, 1.0).mul_(255.0)
             emit("info", f"{label}: in {n}x{w}x{h} -> model {np_}x{wp}x{hp} (input ready in {time.time() - t0:.1f} s)")
             emit("stage", i, "denoising")
@@ -336,26 +427,27 @@ class Engine:
             if matte.shape[1:] != (hp, wp):
                 raise RuntimeError(f"decoded size {matte.shape[1:]} != model size {(hp, wp)}")
             transport.write_mattes(f"{out_prefix}_{i}.bin", padding.crop(matte, n, top, left, h, w))
-            peak_a, peak_r = torch.cuda.max_memory_allocated() / 2**30, torch.cuda.max_memory_reserved() / 2**30
+            peak_a, peak_r = accel.peaks_gb()
             self.job_peak = [max(self.job_peak[0], peak_a), max(self.job_peak[1], peak_r)]
             emit("info", f"{label}: done in {time.time() - t0:.1f} s, allocated at start {alloc_start:.1f} GB, "
                          f"peak allocated {peak_a:.1f} GB, peak reserved {peak_r:.1f} GB, allocated now "
-                         f"{torch.cuda.memory_allocated() / 2**30:.1f} GB, reserved now {self.vram_gb():.1f} GB, "
+                         f"{accel.allocated_gb():.1f} GB, reserved now {self.vram_gb():.1f} GB, "
                          f"lowest free {min_free[0]:.1f} GB")
             emit("chunk_done", i)
 
 
 def args_safe(path: str) -> str:
-    if not path.startswith("/dev/shm/"):
-        raise ValueError(f"input must be in /dev/shm, got {path}")
+    # Staged by the plugin in its staging folder (decision 64: /dev/shm on Linux).
+    if not os.path.basename(path).startswith("ltxag_"):
+        raise ValueError(f"input must be a staged ltxag_* file, got {path}")
     return path
 
 
 def classify(exc: BaseException) -> tuple[str, str]:
     import torch
 
-    if isinstance(exc, torch.cuda.OutOfMemoryError):
-        return "oom", f"CUDA out of memory: {str(exc).splitlines()[0]}"
+    if isinstance(exc, torch.OutOfMemoryError):  # the same class as torch.cuda.OutOfMemoryError
+        return "oom", f"out of GPU memory: {str(exc).splitlines()[0]}"
     if isinstance(exc, FileNotFoundError):
         return "input", str(exc)
     first = str(exc).splitlines()[0] if str(exc) else ""

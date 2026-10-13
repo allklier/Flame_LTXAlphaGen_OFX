@@ -16,15 +16,21 @@ constexpr double kHeldBf16 = 36.8;  // same, bf16 (Flame test 2)
 constexpr double kEncodeBase = 1.56;
 constexpr double kEncodePerMpxFrame = 0.1088;
 constexpr double kContext = 0.7;  // CUDA context, outside torch's numbers
+constexpr double kMpsBase = 44.5;  // M1 Ultra fit, see the header
+constexpr double kMpsPerMpxFrame = 0.231;
 }  // namespace
 
-VramNeed estimateVramNeed(bool fp8, int width, int height, int frames, bool residentTransformer) {
+VramNeed estimateVramNeed(bool fp8, int width, int height, int frames, bool residentTransformer, bool mps) {
   VramNeed n{};
   n.modelW = (std::max(width, 1) + 31) / 32 * 32;
   n.modelH = (std::max(height, 1) + 31) / 32 * 32;
   const int f = std::min(std::max(frames, 1), 145);
   n.modelFrames = f + (8 - (f - 1) % 8) % 8;
   const double mpx = double(n.modelW) * double(n.modelH) / 1e6;
+  if (mps) {
+    n.gb = kMpsBase + kMpsPerMpxFrame * mpx * n.modelFrames + kMargin;
+    return n;
+  }
   n.gb = kBaseFp8 + (fp8 ? 0.0 : kBf16Extra) + kPerMpxFrame * mpx * n.modelFrames +
          kPerMpxAboveHD * std::max(0.0, mpx - kHDMpx) + kMargin;
   if (residentTransformer) {

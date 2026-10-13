@@ -1,7 +1,8 @@
 """LTX Alpha Gen: Flame Python hook that refreshes the viewer when a job finishes (decision 49 b).
 
 Installed by copying this file to /opt/Autodesk/shared/python/ (or a $DL_PYTHON_HOOK_PATH folder);
-Flame loads it at start-up. It runs inside Flame's Python, so it must never raise.
+Flame loads it at start-up. (macOS: that folder exists there too; that Flame loads hooks from it is
+UNVERIFIED.) It runs inside Flame's Python, so it must never raise.
 
 How it works: job.py writes ~/.cache/ltx-alphagen/run/refresh/<job>.json when a job ends. This
 hook polls that folder once a second from Flame's idle loop (flame.schedule_idle_event, the
@@ -26,8 +27,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 
-BUNDLE_WORKER = "/usr/OFX/Plugins/LTXAlphaGen.ofx.bundle/Contents/Resources/worker"
+# The OFX plugin folder: /usr/OFX/Plugins on Linux, /Library/OFX/Plugins on macOS.
+BUNDLE_WORKER = ("/Library/OFX/Plugins" if sys.platform == "darwin" else "/usr/OFX/Plugins") + \
+    "/LTXAlphaGen.ofx.bundle/Contents/Resources/worker"
 REFRESH_DIR = os.path.expanduser("~/.cache/ltx-alphagen/run/refresh")
 POLL_SECONDS = 1
 STEP_BACK = 1  # seconds before stepping back: schedule_idle_event takes an int delay

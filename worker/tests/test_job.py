@@ -17,10 +17,13 @@ sys.path.insert(0, WORKER_DIR)
 
 from ltxag_worker import cache, transport  # noqa: E402
 
+# The plugin's staging folder (decision 64): /dev/shm on Linux, a temp folder elsewhere.
+STAGING = "/dev/shm" if sys.platform == "linux" else tempfile.gettempdir()
+
 
 def stage(job_id, frames):
     n, h, w, _ = frames.shape
-    path = f"/dev/shm/ltxag_job_{job_id}_in.bin"
+    path = f"{STAGING}/ltxag_job_{job_id}_in.bin"
     with open(path, "wb") as f:
         f.write(transport.HEADER.pack(transport.IN_MAGIC, transport.VERSION, w, h, n, 3))
         frames.astype("<f2").tofile(f)
@@ -44,15 +47,15 @@ class JobTest(unittest.TestCase):
             "worker": os.path.join(WORKER_DIR, "dummy_worker.py"), "seconds": 0.1,
             "simulate": simulate, "precision": "bf16", "title": "test", **extra,
         }
-        mpath = f"/dev/shm/ltxag_job_{job_id}.json"
+        mpath = f"{STAGING}/ltxag_job_{job_id}.json"
         with open(mpath, "w") as f:
             json.dump(manifest, f)
         env = dict(os.environ, HOME=root)  # keep test logs out of the user's real log
         rc = subprocess.run([sys.executable, "-I", "-B", os.path.join(WORKER_DIR, "job.py"), mpath,
                              "--no-ui"], timeout=60, env=env).returncode
         self.assertTrue(os.path.exists(os.path.join(root, ".cache/ltx-alphagen/logs/ltx-alphagen.log")))
-        leftovers = [p for p in os.listdir("/dev/shm") if p.startswith(f"ltxag_job_{job_id}")]
-        self.assertEqual(leftovers, [], "job must clean up its /dev/shm files")
+        leftovers = [p for p in os.listdir(STAGING) if p.startswith(f"ltxag_job_{job_id}")]
+        self.assertEqual(leftovers, [], "job must clean up its staged files")
         self.assertEqual(os.listdir(os.path.join(root, "pending")), [], "pending markers left")
         with open(os.path.join(root, "jobs", job_id + ".json")) as f:
             return rc, keys, json.load(f)

@@ -3,9 +3,17 @@
   "note": "Pinned runtime and model files for this plugin version (decision 51). File SHA-256 values were computed 2026-10-11 from copies whose sizes match HF revision below; HF masks hashes for gated repos without auth, so confirm them at the first authenticated download (setup verifies every file and rejects mismatches). 'path' is the layout inside the Model Folder; 'hf_path' is the path inside the HF repo.",
   "uv": {
     "version": "0.12.18",
-    "url": "https://github.com/astral-sh/uv/releases/download/0.12.18/uv-x86_64-unknown-linux-gnu.tar.gz",
-    "size": 19798687,
-    "sha256": "89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16"
+    "note": "one entry per sys.platform; sizes and SHA-256 from the release assets' .sha256 files",
+    "linux": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.18/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "size": 19798687,
+      "sha256": "89eadd7c76fc063887959510d5ba0ab1264dfd5f1143b925ddb73021a40acf16"
+    },
+    "darwin": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.18/uv-aarch64-apple-darwin.tar.gz",
+      "size": 16963768,
+      "sha256": "cf40e0c6a202190ccd9e0406dcfdd5b2d6668a9a5c779b17948963df32aafe5b"
+    }
   },
   "ltx2": {
     "commit": "9ec55f9f22798a3198d9c923856824821bc3317e",
@@ -19,6 +27,7 @@
   "runtime": {
     "note": "uv cache size after a fresh uv sync of ltx2-uv.lock (measured 6627332375 bytes incl. pip_extra, Rocky 9.7, 2026-10-11); only drives the setup progress bar",
     "uv_cache_bytes": 6600000000,
+    "uv_cache_bytes_darwin": 1400000000,
     "python": "3.14.7",
     "python_note": "uv-managed Python used for the runtime (uv sync --managed-python --python); the version every test ran on"
   },

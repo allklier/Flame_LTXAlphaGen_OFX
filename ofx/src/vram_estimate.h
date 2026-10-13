@@ -12,6 +12,11 @@
 //   need = max(need above, T + 1.56 GB + 0.1088 GB * Mpx * frames + 0.7 GB context + 1 GB),
 // T = the held transformer, reserved: fp8 21.7 GB, bf16 36.8 GB. Fitted on reserved memory
 // (what free memory loses): HD 145 fp8 56.2 GB, 720p 57 bf16 44.2 GB. Pure, no OFX.
+// Apple Silicon (mps = true, decision 65; bf16 only, MPS has no fp8): measured on an M1 Ultra
+// (96 GB Metal working set, torch 2.14.1, our worker, 2026-10-12) as the lowest free working set
+// (what the process held, incl. the MPS allocator's cache): 720p 49f 52.3, HD 33f 60.4,
+// HD 73f 79.7 GB. need = 44.5 + 0.231 GB * Mpx * frames + 1 GB; HD 145 -> ~115 GB, over the
+// working set. The resident-transformer case is not measured on MPS (UNVERIFIED): same formula.
 #pragma once
 
 namespace ltxag {
@@ -23,6 +28,6 @@ struct VramNeed {
 };
 
 VramNeed estimateVramNeed(bool fp8, int width, int height, int framesInLargestChunk,
-                          bool residentTransformer);
+                          bool residentTransformer, bool mps = false);
 
 }  // namespace ltxag

@@ -42,9 +42,17 @@ add_library(ofx_support STATIC
 target_include_directories(ofx_support PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Support/include)
 target_compile_options(ofx_support PRIVATE -w -fvisibility=hidden)
 
-# OS-specific sources behind ofx/src/platform.h (decision 64).
+# OS-specific sources behind ofx/src/platform.h (decision 64), the libraries they need, and the
+# bundle's binary folder (OFX: Linux-x86-64; MacOS, as the installed Mac plugins use).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(LTXAG_PLATFORM_SOURCES ofx/src/platform_linux.cpp ofx/src/platform_linux_nvml.cpp)
+  set(LTXAG_PLATFORM_LIBS dl)
+  set(LTXAG_ARCH_DIR Linux-x86-64)
+elseif(APPLE)
+  enable_language(OBJCXX)
+  set(LTXAG_PLATFORM_SOURCES ofx/src/platform_macos.cpp ofx/src/platform_macos_metal.mm)
+  set(LTXAG_PLATFORM_LIBS "-framework Metal" "-framework Foundation")
+  set(LTXAG_ARCH_DIR MacOS)
 else()
   message(FATAL_ERROR "No platform layer for ${CMAKE_SYSTEM_NAME} (ofx/src/platform.h)")
 endif()
@@ -63,7 +71,7 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/cache.cpp
   ofx/src/marker.cpp
   ofx/src/env_info.cpp)
-target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support ltxag_core dl pthread)
+target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support ltxag_core ${LTXAG_PLATFORM_LIBS} pthread)
 target_compile_definitions(${BUNDLE_NAME} PRIVATE LTXAG_DEV_BUILD=$<BOOL:${LTXAG_DEV_BUILD}>
   LTXAG_VERSION="${LTXAG_VERSION}" LTXAG_GIT="${LTXAG_GIT}"
   LTXAG_VERSION_MAJOR=${LTXAG_VERSION_MAJOR} LTXAG_VERSION_MINOR=${LTXAG_VERSION_MINOR})
@@ -72,11 +80,32 @@ target_compile_options(${BUNDLE_NAME} PRIVATE -Wall -Wextra -Wno-deprecated-decl
 # Export only the two OFX entry points. libstdc++ is linked dynamically: Flame
 # 2027.1 itself (and Sapphire) use the system /lib64/libstdc++.so.6 (GCC 11),
 # so building with Rocky 9's system GCC 11 matches the host exactly.
-target_link_options(${BUNDLE_NAME} PRIVATE
-  -Wl,--version-script=${OFX_DIR}/Support/include/linuxSymbols -Wl,--no-undefined)
+# macOS: the vendored osxSymbols list; ld's default for undefined symbols is already "error".
+if(APPLE)
+  target_link_options(${BUNDLE_NAME} PRIVATE
+    -Wl,-exported_symbols_list,${OFX_DIR}/Support/include/osxSymbols)
+  # Minimal bundle description, as most installed Mac OFX bundles carry one.
+  file(WRITE ${BUNDLE_DIR}/Contents/Info.plist
+"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+  <key>CFBundleExecutable</key><string>${BUNDLE_NAME}.ofx</string>
+  <key>CFBundleIdentifier</key><string>com.janklier.ltx.alphagen</string>
+  <key>CFBundleName</key><string>LTX Alpha Gen</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleVersion</key><string>${LTXAG_VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${LTXAG_VERSION}</string>
+</dict>
+</plist>
+")
+else()
+  target_link_options(${BUNDLE_NAME} PRIVATE
+    -Wl,--version-script=${OFX_DIR}/Support/include/linuxSymbols -Wl,--no-undefined)
+endif()
 set_target_properties(${BUNDLE_NAME} PROPERTIES
   PREFIX "" SUFFIX ".ofx"
-  LIBRARY_OUTPUT_DIRECTORY ${BUNDLE_DIR}/Contents/Linux-x86-64)
+  LIBRARY_OUTPUT_DIRECTORY ${BUNDLE_DIR}/Contents/${LTXAG_ARCH_DIR})
 
 # Python worker and Model Page helper go into the bundle's Resources
 # (refreshed on every build, not only when the .ofx relinks).
@@ -108,7 +137,7 @@ add_test(NAME worker_python
 
 add_executable(test_worker_roundtrip ofx/tests/test_worker_roundtrip.cpp ofx/src/transport.cpp
   ofx/src/process.cpp ${LTXAG_PLATFORM_SOURCES})
-target_link_libraries(test_worker_roundtrip PRIVATE dl)
+target_link_libraries(test_worker_roundtrip PRIVATE ${LTXAG_PLATFORM_LIBS})
 target_include_directories(test_worker_roundtrip PRIVATE ofx/src)
 add_dependencies(test_worker_roundtrip bundle_resources)
 add_test(NAME worker_roundtrip
@@ -116,7 +145,7 @@ add_test(NAME worker_roundtrip
 
 add_executable(test_cache ofx/tests/test_cache.cpp ofx/src/cache.cpp ofx/src/transport.cpp
   ofx/src/user_config.cpp ofx/src/process.cpp ${LTXAG_PLATFORM_SOURCES})
-target_link_libraries(test_cache PRIVATE dl)
+target_link_libraries(test_cache PRIVATE ${LTXAG_PLATFORM_LIBS})
 target_include_directories(test_cache PRIVATE ofx/src)
 add_test(NAME cache COMMAND test_cache)
 
@@ -138,4 +167,4 @@ target_include_directories(test_load_bundle PRIVATE ${OFX_DIR}/include)
 target_link_libraries(test_load_bundle PRIVATE dl)
 add_dependencies(test_load_bundle ${BUNDLE_NAME})
 add_test(NAME load_bundle
-  COMMAND test_load_bundle ${BUNDLE_DIR}/Contents/Linux-x86-64/${BUNDLE_NAME}.ofx)
+  COMMAND test_load_bundle ${BUNDLE_DIR}/Contents/${LTXAG_ARCH_DIR}/${BUNDLE_NAME}.ofx)
