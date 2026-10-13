@@ -392,10 +392,22 @@ class ResidentChannel:
             time.sleep(0.2)
 
     def kill(self) -> None:
-        try:
-            os.killpg(self.server_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # Cancel must really free the GPU (Mac test 2026-10-13: GPU looked busy after a Cancel,
+        # and the end line said "alive" because it was written 57 ms after the kill). Wait for
+        # the worker to be gone and log what actually happened; on the M1 a SIGKILLed process
+        # with ~50 s of queued MPS work exits in ~1.5 s.
+        t0 = time.time()
+        for attempt in (1, 2):
+            try:
+                os.killpg(self.server_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            while self._server_alive() and time.time() - t0 < 10 * attempt:
+                time.sleep(0.1)
+            if not self._server_alive():
+                log.info(f"cancel: worker pid {self.server_pid} exited {time.time() - t0:.1f} s after SIGKILL")
+                return
+        log.error(f"cancel: worker pid {self.server_pid} still alive {time.time() - t0:.0f} s after two SIGKILLs")
 
     def _server_alive(self) -> bool:
         # A killed child stays a zombie (kill(pid, 0) still succeeds) until we reap it.

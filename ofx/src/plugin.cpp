@@ -427,6 +427,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   ~AlphaGenEffect() override {
     LogScope scope(nodeId_);
     stopWatcher();
+    stopSetupWatcher();
     LOGI("destroyInstance %p", static_cast<void*>(this));
   }
 
@@ -474,6 +475,11 @@ class AlphaGenEffect : public OFX::ImageEffect {
     OfxRectI sb = db;
     std::unique_ptr<OFX::Image> src;
     const bool setupRequired = gateClosed();
+    if (gateWasClosed_ && !setupRequired) {  // Setup finished in the background since the last look
+      LOGI("render: setup is now complete; enabling the node's params");
+      refreshSetupUi();
+    }
+    gateWasClosed_ = setupRequired;
 
     if (setupRequired) {
       message = "Setup required: see the Licence and Models columns.";
@@ -1144,6 +1150,38 @@ class AlphaGenEffect : public OFX::ImageEffect {
     if (watcher_.joinable()) watcher_.join();
   }
 
+  // Setup runs as its own process; nothing tells the node when it is done, so the status stayed
+  // "Models: NO" and the params disabled until the next user edit (Mac test 2026-10-13). This
+  // thread polls the user config until Setup reports ready, then refreshes the Setup UI; changes
+  // from a non-action thread show at the next interaction in Flame (see "Flame host behaviour").
+  void startSetupWatcher() {
+    stopSetupWatcher();
+    setupStop_ = false;
+    const std::string node = nodeId_;
+    setupWatcher_ = std::thread([this, node] {
+      LogScope scope(node);
+      LOGI("setup watcher started (this thread is not an OFX action thread)");
+      const auto t0 = std::chrono::steady_clock::now();
+      while (!setupStop_ && std::chrono::steady_clock::now() - t0 < std::chrono::hours(4)) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (!setupState().ready()) continue;
+        try {
+          refreshSetupUi();
+          LOGI("setup watcher: setup complete; Setup UI refreshed from a non-action thread");
+        } catch (const std::exception& e) {
+          LOGE("setup watcher: refresh FAILED: %s [%s]", e.what(), typeid(e).name());
+        }
+        return;
+      }
+      LOGI("setup watcher finished without a ready setup");
+    });
+  }
+
+  void stopSetupWatcher() {
+    setupStop_ = true;
+    if (setupWatcher_.joinable()) setupWatcher_.join();
+  }
+
   void watch(const std::string& jobId, const std::string& root, const std::string& node,
              const std::vector<std::string>& keys) {
     LogScope scope(node, jobId);
@@ -1243,7 +1281,21 @@ class AlphaGenEffect : public OFX::ImageEffect {
     const std::string helper = resourcesDir() + "/helper/setup_helper.py";
     std::vector<std::string> argv = {pythonPath(), "-I", "-B", helper, "--model-dir", dir,
                                      "--cache-root", cacheRoot()};
-    if (!existing.empty()) argv.insert(argv.end(), {"--existing", existing});
+    if (!existing.empty()) {
+      argv.insert(argv.end(), {"--existing", existing});
+      // Decision 66: link to the existing files instead of copying them. Asked each time; a host
+      // that doesn't answer (neither Yes nor No) gets the copy, as before.
+      const OFX::Message::MessageReplyEnum reply = sendMessage(
+          OFX::Message::eMessageQuestion, "",
+          "Link to the model files found in Existing Models instead of copying them?\n\n"
+          "Yes: link (saves up to 73 GB). The Existing Models folder must then stay where it is "
+          "and stay available; on a network folder every model load is slower.\n\n"
+          "No: copy them into the Model Folder (independent of the original files).\n\n"
+          "Either way each file is checked against its expected checksum first.");
+      const bool link = reply == OFX::Message::eMessageReplyYes;
+      LOGI("download: link instead of copy? reply %d -> %s", int(reply), link ? "link" : "copy");
+      if (link) argv.push_back("--link");
+    }
     const std::string level = logLevel() == LogLevel::Debug ? "debug" : "info";
     Env extras = {"LTXAG_LOG_LEVEL=" + level};
     if (!token.empty()) extras.push_back("HF_TOKEN=" + token);
@@ -1255,6 +1307,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
                                                      : std::string(kTokenCaptionDefault));
     if (!ok) error("Download failed to start: " + err);
     LOGI("download: helper %s %s; token cleared", ok ? "launched" : "FAILED", err.c_str());
+    if (ok) startSetupWatcher();
   }
 
   // Bundles logs, environment and job status files for a support request (decision 39).
@@ -1331,6 +1384,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
   bool inChangedParam_ = false;
   bool loggedOutput_ = false;
   std::thread watcher_;
+  std::thread setupWatcher_;
+  std::atomic<bool> setupStop_{false};
+  bool gateWasClosed_ = false;  // render: refresh the Setup UI once Setup has completed
   std::atomic<bool> stopFlag_{false};
 };
 

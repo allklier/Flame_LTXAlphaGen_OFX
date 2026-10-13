@@ -87,6 +87,15 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
   file name. Files are verified by **size + SHA-256** against a **pinned manifest shipped with the
   plugin**, then **copied** into the Model Folder; only missing files are downloaded. HF hides
   SHA-256 for these gated repos without auth, so the hashes are captured once per release.
+- **66.** **Link instead of copy, asked at Download** (DECIDED, user 2026-10-13: save disk space).
+  When Existing Models is set, Download asks Yes/No (`eMessageQuestion`): Yes passes `--link`,
+  and Setup hashes each found file **in place** (still verified against the manifest, so it saves
+  space, not time) and puts a **symlink** to it in the Model Folder (not a hard link: Existing
+  Models is often on another volume or a share); No, or a host that doesn't answer, copies as
+  before. A popup rather than a param because the Setup tab's Models column is full (5 rows).
+  A dangling or mismatching file at the destination is replaced; a verified link is kept on
+  re-runs. The Existing Models folder must stay mounted; a network folder slows every model load.
+  Tested in `worker/tests/test_setup_models.py` (link, copy, other version, dangling link).
 - **53.** **Project licence: Mozilla Public License 2.0.** `LICENSE` is the canonical text from
   `mozilla.org/media/MPL/2.0/index.txt`. MPL is file-level copyleft: our files stay MPL; the
   vendored OpenFX files keep their BSD licence (in their headers); the LTX code and weights are
@@ -282,9 +291,27 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
     overflows to NaN in the VAE encoder, even with PixelNorm in fp32); matmul bf16 8.9, fp16 16.4,
     fp32 13.0 TFLOPS. So on MPS the worker encodes the reference in **fp32** (injection 6,
     `ReferenceEncoderInDtype`): 285 → 126 s at 720p × 49, same matte. The transformer stays bf16
-    (fp16 there is a possible later speed-up, with overflow risk).
+    (fp16 there is a possible later speed-up, with overflow risk). **Chip-aware encode dtype
+    (DECIDED, user 2026-10-13, built):** fp32 is right for the M1 only; M2 and later have
+    hardware bf16. At engine start `pick_encode_dtype` times one Conv3d (128→128, k3, input
+    1×128×5×64×64; warm-up + 3 runs) in bf16 and fp32 and the encoder runs in the faster one (a
+    tie goes to bf16); the choice is logged as `reference encode in <dtype> (conv3d probe: …)`.
+    M1 Ultra: bf16 43 ms, fp32 20 ms → fp32 in 5 of 5 runs, probe 0.43 s; worker_smoke 512×512×9
+    passed. An M2+ choosing bf16 is UNVERIFIED (no such Mac here).
+  - **Cancel on the Mac:** the worker dies within 0.2 s of the SIGKILL (job.py now waits for it
+    and logs "cancel: worker pid … exited X s after SIGKILL"), but **GPU work already submitted
+    runs to completion** (measured: 100 % for ~20 s after the process was gone). The reference
+    encode is one upstream call, so MPS had the whole encode in flight: a Cancel while "starting"
+    kept the GPU busy 20–30 s (Mac test 2026-10-13). The encode wrapper therefore calls
+    `torch.mps.synchronize()` after every `nn.Conv3d` (forward hooks, removed after the call):
+    identical latent (max diff 0.0), same time (85.5 vs 86.4 s at 720p × 33), GPU idle ~3 s after a
+    kill. How long the GPU stays busy after a Cancel mid-denoise is unmeasured.
   - **bf16 only:** MPS has no fp8 dtype (`Undefined type Float8_e4m3fn`). The Mac default is bf16;
     fp8 selected on a Mac is refused at Process with a message (decision 34: no silent downgrade).
+    This holds for every Apple Silicon chip: the error comes from torch's own MPS dtype table
+    (`aten/src/ATen/native/mps/OperationUtils.mm`, torch 2.14.1), not from the M1. fp8 stays in
+    the Mac's dropdown on purpose (DECIDED, user 2026-10-13: the message tells users who run both
+    platforms why it differs; it also keeps setups' stored indexes valid).
   - **Memory model** (`vram_estimate`, `mps` flag): need = 44.5 + 0.231 GB per Mpx·frame + 1,
     fitted to the three runs above (peak = lowest free working set). Free memory on the Mac =
     min(working set, available RAM) (`platform_macos_metal.mm`), so Auto picks Half or Quarter
@@ -547,7 +574,8 @@ process per run incl. model load, Gemma loaded and freed in process):
      `uv sync --frozen --no-dev --extra natten`, `opencolorio==2.6.0`, then a torch/CUDA/OCIO
      smoke test.
   2. **Models:** keep if already verified (`*.verified` marker: sha + size + mtime); copy from
-     Existing Models while hashing; or download from HF while hashing. 401/403 → the
+     Existing Models while hashing, or link to it after hashing it (`--link`, decision 66); or
+     download from HF while hashing. 401/403 → the
      "accept the model terms at huggingface.co/<repo>" message.
   3. **Prompt cache** (worker `--build-embeddings`).
   4. **Config** `model_dir`, `ltx_python`, `runtime_commit`, `models_ready`, written only on success.
@@ -581,6 +609,11 @@ process per run incl. model load, Gemma loaded and freed in process):
   folder and restart the worker).
 - **Plugin Setup tab:** Licence column; Models column = Model Folder, Existing Models, status;
   Support column = Debug Logging, Collect Logs. Ready = `models_ready` + `ltx_python` exists.
+  Setup runs as its own process, so the node learns that it finished in two ways (Mac test
+  2026-10-13: status stayed "Models: NO" and the params disabled until the next user edit): a
+  **setup watcher** thread started by Download polls the config every 2 s (up to 4 h) and calls
+  `refreshSetupUi` from that non-action thread (shown at the next interaction in Flame), and
+  **render** refreshes it once when the gate goes from closed to open. Both UNVERIFIED in Flame.
 - **`tools/setup_smoke.sh`** (isolated HOME, 11 checks): fresh install with copies from Existing
   Models (~10 min); a re-run keeps all files (~30 s); missing file without a token → clear error;
   fake token → the accept-terms hint, and the token isn't in the log; a same-size wrong-content

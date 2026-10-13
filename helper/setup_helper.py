@@ -4,7 +4,7 @@ Launched detached by the plugin's Download button (Setup tab). Standard library 
 with the system python3 (Rocky 9: 3.9, macOS: 3.9 from the Command Line Tools) before any venv
 exists.
 
-  python3 -I -B setup_helper.py --model-dir D --cache-root R [--existing E] [--no-ui]
+  python3 -I -B setup_helper.py --model-dir D --cache-root R [--existing E [--link]] [--no-ui]
   HF_TOKEN in the environment (decision 13: never on argv, never stored). Only needed when a
   file has to be downloaded.
 
@@ -14,7 +14,8 @@ Steps (decisions 2/7/9/13/20/51), all pinned by model_manifest.json next to this
               (macOS: the darwin uv build and an MPS smoke test; the natten extra is Linux-only in
               the lockfile's markers, so it installs nothing there)
   2 models    for each file: already in <D> and verified -> keep; found by exact name under
-              --existing and verified -> COPY (hashing while copying); else download from HF
+              --existing and verified -> COPY (hashing while copying), or with --link a symlink to
+              it after hashing it in place (decision 66); else download from HF
               (hashing while downloading). Verification = size + SHA-256 from the manifest.
   3 prompt    build the empty-prompt embedding cache (worker --build-embeddings, own process)
   4 config    model_dir, ltx_python, runtime_commit, models_ready in ~/.config/ltx-alphagen
@@ -367,11 +368,12 @@ def install_runtime(man: dict, rt: str, prog: Progress) -> str:
     return py
 
 
-def gather_models(man: dict, model_dir: str, existing: str, token: str, prog: Progress) -> dict:
+def gather_models(man: dict, model_dir: str, existing: str, token: str, prog: Progress,
+                  link: bool = False) -> dict:
     files = man["files"]
     total = sum(f["size"] for f in files)
     base, done = 0.10, 0
-    summary = {"kept": [], "copied": [], "downloaded": []}
+    summary = {"kept": [], "copied": [], "linked": [], "downloaded": []}
     for entry in files:
         dst = os.path.join(model_dir, entry["path"])
         name = os.path.basename(entry["path"])
@@ -393,6 +395,19 @@ def gather_models(man: dict, model_dir: str, existing: str, token: str, prog: Pr
                     continue
                 source = cand
                 break
+        if source and link:  # decision 66: verify in place, then point the Model Folder at it
+            log.info(f"{name}: found {source}; verifying it to link instead of copying")
+            if sha256_file(source, prog, f"{label} (link)", f0, f1) == entry["sha256"]:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.lexists(dst):  # a mismatching file or a dangling link from an earlier run
+                    os.unlink(dst)
+                os.symlink(os.path.abspath(source), dst)
+                mark_verified(dst, entry)
+                summary["linked"].append(f"{name} -> {source}")
+                done += entry["size"]
+                continue
+            log.warn(f"{name}: the existing copy is a different version; downloading instead")
+            source = None
         if source:
             log.info(f"{name}: found {source}; copying with verification")
             try:
@@ -440,6 +455,7 @@ def main() -> int:
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--cache-root", required=True)
     ap.add_argument("--existing", default="")
+    ap.add_argument("--link", action="store_true", help="symlink files from --existing instead of copying")
     ap.add_argument("--skip-runtime", action="store_true", help="tests: reuse --ltx-python instead")
     ap.add_argument("--ltx-python", default="")
     ap.add_argument("--no-ui", action="store_true")
@@ -449,7 +465,7 @@ def main() -> int:
     with open(os.path.join(HERE, "model_manifest.json")) as f:
         man = json.load(f)
     model_dir = os.path.abspath(os.path.expanduser(a.model_dir))
-    log.info(f"setup start: model_dir={model_dir} existing={a.existing or '-'} cache_root={a.cache_root} "
+    log.info(f"setup start: model_dir={model_dir} existing={a.existing or '-'} link={a.link} cache_root={a.cache_root} "
              f"token={'given' if token else 'none'} (length {len(token)})")
     prog = Progress(ui)
     t0 = time.time()
@@ -465,7 +481,7 @@ def main() -> int:
         log.info(f"C compiler for Triton: {cc}")
         os.makedirs(model_dir, exist_ok=True)
         py = a.ltx_python if a.skip_runtime else install_runtime(man, os.path.join(model_dir, "runtime"), prog)
-        summary = gather_models(man, model_dir, a.existing, token, prog)
+        summary = gather_models(man, model_dir, a.existing, token, prog, link=a.link)
         emb = os.path.join(a.cache_root, "prompt-empty.safetensors")
         worker = os.path.join(WORKER_DIR, "ltx_worker.py")
         m = {e["key"]: os.path.join(model_dir, e["path"]) for e in man["files"]}
@@ -476,8 +492,9 @@ def main() -> int:
                       "models_ready": time.strftime("%Y-%m-%d")})
         prog.close()
         msg = (f"Setup finished in {time.time() - t0:.0f} s. Kept {len(summary['kept'])}, copied "
-               f"{len(summary['copied'])}, downloaded {len(summary['downloaded'])} file(s).")
-        log.info(msg + f" copied: {summary['copied']} downloaded: {summary['downloaded']}")
+               f"{len(summary['copied'])}, linked {len(summary['linked'])}, downloaded "
+               f"{len(summary['downloaded'])} file(s).")
+        log.info(msg + f" copied: {summary['copied']} linked: {summary['linked']} downloaded: {summary['downloaded']}")
         Progress.message("info", msg, ui)
         return 0
     except Cancelled:

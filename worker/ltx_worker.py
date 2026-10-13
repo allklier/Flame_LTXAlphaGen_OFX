@@ -27,10 +27,13 @@ LoRA 1.0. Injections into the pinned LTX-2 code (commit 9ec55f9):
   - pipeline.audio_decoder = None: video-only chunks (chunks/operators.py:285), saving ~2 s/chunk;
   - samplers.tqdm -> a stepping wrapper that reports each denoising step (there is no callback;
     euler_denoising_loop iterates tqdm(sigmas[:-1]), utils/samplers.py:72);
-  - MPS only: pipeline.image_conditioner -> ReferenceEncoderInDtype(float32). M1 has no fast
-    bf16: a bf16 conv3d runs at 0.40 TFLOPS vs 0.92 fp32 (4.7 fp16, which overflows to NaN in
-    this encoder), so the reference encode took 285 s of a 887 s 720p x 49 job. The latent goes
-    back to bf16 for the rest of the pipeline.
+  - MPS only: pipeline.image_conditioner -> ReferenceEncoderInDtype(bf16 or fp32, whichever a
+    conv3d probe at start finds faster, pick_encode_dtype). M1 has no fast bf16: a bf16 conv3d
+    runs at 0.40 TFLOPS vs 0.92 fp32 (4.7 fp16, which overflows to NaN in this encoder), so the
+    bf16 reference encode took 285 s of a 887 s 720p x 49 job; M2 and later have hardware bf16.
+    The latent goes back to bf16 for the rest of the pipeline. It also waits for the GPU after every conv3d:
+    work already submitted runs to completion after a SIGKILL (measured: 100 % for ~20 s after
+    the process was gone), and the encode is one call, so Cancel left the whole encode running.
 Progress lines (besides info/chunk_done/done/error): "stage <chunk> <name>" (converting,
 preparing, denoising, decoding), "step <chunk> <k> <n>" after each denoising step, and at the
 end "vram <min_free_gb> <peak_alloc_gb> <peak_reserved_gb> <reserved_at_start_gb> <torch>": the lowest
@@ -160,27 +163,58 @@ class MemoryFrameSource:
 
 class ReferenceEncoderInDtype:
     """Stands in for ImageConditioner (blocks.py:948): builds the reference video encoder in
-    another dtype and casts frames in / latents out, so the rest of the pipeline is unchanged."""
+    another dtype and casts frames in / latents out, so the rest of the pipeline is unchanged.
+    With `sync`, it is called after every Conv3d, so little GPU work is queued at any time."""
 
     class _Cast:
-        def __init__(self, enc, dtype) -> None:  # noqa: ANN001
-            self.enc, self.dtype = enc, dtype
+        def __init__(self, enc, dtype, sync) -> None:  # noqa: ANN001
+            self.enc, self.dtype, self.sync = enc, dtype, sync
 
         def __call__(self, video):  # noqa: ANN001
-            return self.enc(video.to(self.dtype)).to(video.dtype)
+            import torch
+
+            hooks = [m.register_forward_hook(lambda *_: self.sync())
+                     for m in self.enc.modules() if self.sync and isinstance(m, torch.nn.Conv3d)]
+            try:
+                return self.enc(video.to(self.dtype)).to(video.dtype)
+            finally:
+                for h in hooks:
+                    h.remove()
 
         def __getattr__(self, name: str):
             return getattr(self.enc, name)
 
-    def __init__(self, inner, dtype) -> None:  # noqa: ANN001 - ImageConditioner, torch.dtype
+    def __init__(self, inner, dtype, sync=None) -> None:  # noqa: ANN001 - ImageConditioner, torch.dtype
         inner._dtype = dtype  # the dtype its Builder builds the encoder in (blocks.py:998)
-        self.inner, self.dtype = inner, dtype
+        self.inner, self.dtype, self.sync = inner, dtype, sync
 
     def resolve_crf(self, images):  # noqa: ANN001
         return self.inner.resolve_crf(images)
 
     def __call__(self, fn):  # noqa: ANN001
-        return self.inner(lambda enc: fn(ReferenceEncoderInDtype._Cast(enc, self.dtype)))
+        return self.inner(lambda enc: fn(ReferenceEncoderInDtype._Cast(enc, self.dtype, self.sync)))
+
+
+def pick_encode_dtype(torch, device):  # noqa: ANN001, ANN201 - the torch module, torch.device
+    """MPS: times one encoder-sized Conv3d in bf16 and fp32 and returns (faster dtype, bf16 ms,
+    fp32 ms). The M1 has no fast bf16 (fp32 wins), M2 and later have hardware bf16 (decision 65).
+    A tie goes to bf16: upstream's dtype, half the encoder memory."""
+    conv = torch.nn.Conv3d(128, 128, 3, padding=1)
+    times = {}
+    for dtype in (torch.bfloat16, torch.float32):
+        c = conv.to(device, dtype)
+        x = torch.randn(1, 128, 5, 64, 64, device=device, dtype=dtype)
+        with torch.inference_mode():
+            c(x)  # warm-up: kernel selection
+            torch.mps.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(3):
+                c(x)
+            torch.mps.synchronize()
+        times[dtype] = (time.perf_counter() - t0) / 3 * 1000
+    del c, x
+    best = torch.float32 if times[torch.float32] < times[torch.bfloat16] else torch.bfloat16
+    return best, times[torch.bfloat16], times[torch.float32]
 
 
 class CachedPromptEncoder:
@@ -283,8 +317,12 @@ class Engine:
             quantization=quant)
         self.pipeline.prompt_encoder = CachedPromptEncoder(embedding)  # injection 2
         self.pipeline.audio_decoder = None  # injection 4: video-only output
-        if self.accel.kind == "mps":  # injection 6: fp32 reference encode (M1 bf16 conv3d is slow)
-            self.pipeline.image_conditioner = ReferenceEncoderInDtype(self.pipeline.image_conditioner, torch.float32)
+        if self.accel.kind == "mps":  # injection 6: reference encode in the chip's faster dtype
+            enc_dtype, ms_bf16, ms_fp32 = pick_encode_dtype(torch, self.accel.device)
+            emit("info", f"reference encode in {str(enc_dtype).removeprefix('torch.')} "
+                         f"(conv3d probe: bf16 {ms_bf16:.1f} ms, fp32 {ms_fp32:.1f} ms)")
+            self.pipeline.image_conditioner = ReferenceEncoderInDtype(self.pipeline.image_conditioner, enc_dtype,
+                                                                      sync=torch.mps.synchronize)
         self._on_step = lambda k, n: None
         self._install_step_hook()  # injection 5
         self._transformer, self._transformer_key = None, None
