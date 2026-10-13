@@ -19,7 +19,7 @@ tier tests the exact release binary.
 
 ## How the host behaves like Flame
 
-As recorded in CLAUDE.md ("Flame host behaviour"):
+As recorded in ofx/CLAUDE.md ("Flame host behaviour"):
 
 - every action runs on the calling thread;
 - every plugin `setValue` comes straight back as `instanceChanged` (reason "plugin edited").
@@ -80,3 +80,13 @@ The full tier needs a completed Setup for the user running it.
   auto-refresh (job.py only writes refresh markers for a process named `flame`), the layout,
   OCIO colour conversion with the real model, 6K, resident-worker reuse between jobs
   (`tools/resident_smoke.py`).
+
+## Why it is built this way (decision 67, user choices 2026-10-13)
+
+- **Our own Flame-like host**, not the OpenFX HostSupport library: HostSupport behaves like a
+  generic host, and the point is Flame's quirks (echoed setValues, lazy off-thread changes).
+- **Fast tier on a dev build:** release builds compile the dummy worker out, and a test switch in
+  shipping code was rejected. The full tier tests the exact release binary.
+- **Fake windows from the harness** instead of a product switch, so Cancel runs job.py's real path.
+- **Checked by mutation:** an unconditional label write in `changedParam` fails with the recursion
+  error; a 50% overlay fails every frame.

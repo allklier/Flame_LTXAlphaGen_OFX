@@ -1,5 +1,5 @@
 // A minimal OFX host for system tests (systest/README.md). It loads the plugin bundle the way
-// Flame does and imitates the Flame behaviour recorded in CLAUDE.md ("Flame host behaviour"):
+// Flame does and imitates the Flame behaviour recorded in ofx/CLAUDE.md ("Flame host behaviour"):
 // - every action runs on the calling (main) thread;
 // - every plugin setValue is reported straight back as instanceChanged (reason plugin edit),
 //   and a recursion deeper than kMaxEchoDepth is recorded as an error (Flame crashed there);
