@@ -15,7 +15,9 @@ Silicon on macOS. There is no cloud service and no ComfyUI.
 
 (read full details further down)
 
-- Download the release bundle, unpack it, and run install.sh with 'sudo'
+- Download the release bundle, unpack it, and run install.sh with 'sudo'. You can find
+the install bundles for Linux and MacOS in the right-hand toolbar of GitHub when you
+click on releases.
 - Launch Flame, setup a new batch group and add 'LTX Alpha Gen' OFX node after a media file
 - The first run requires some setup. Open the plugin's Setup tab:
 
@@ -52,6 +54,15 @@ estimate. Once the processing is complete it will automatically update the viewe
 The image output will show an overlay, and the matte output will have the matte.
 14. The output is cached locally to avoid re-running the model. If you're done you 
 may want to use the 'Purge Cache' button to purge those files. 
+
+The Alpha Gen tab:
+
+![The Alpha Gen tab in Flame](docs/LTX_OFX_page1.png)
+
+The Setup tab:
+
+![The Setup tab in Flame](docs/LTX_OFX_page2.png)
+
 
 ## Origins
 
@@ -448,6 +459,5 @@ haven't measured.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please follow the community guidelines at
-https://github.com/flamelogik.
+Issues and pull requests are welcome. 
 

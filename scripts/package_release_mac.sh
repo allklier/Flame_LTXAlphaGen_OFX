@@ -13,6 +13,15 @@ CMAKE=${CMAKE:-cmake}
 if [[ $CMAKE == */* ]]; then CTEST=${CTEST:-${CMAKE%/*}/ctest}; else CTEST=${CTEST:-ctest}; fi
 CMAKE_ARGS=${CMAKE_ARGS:-}
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Release gate (systest/README.md): this commit must have passed the system test on macOS
+# (scripts/system_test.sh), from a clean checkout. SKIP_SYSTEST=1 overrides (say why in the notes).
+if [ "${SKIP_SYSTEST:-0}" != 1 ]; then
+  [ -z "$(git -C "$SRC" status --porcelain)" ] ||
+    { echo "uncommitted changes: commit, run scripts/system_test.sh, then package (or SKIP_SYSTEST=1)" >&2; exit 1; }
+  PASSFILE="$SRC/dist/systest/$(git -C "$SRC" rev-parse --short HEAD)/macos/PASS"
+  [ -f "$PASSFILE" ] || { echo "no system-test pass for this commit on macOS ($PASSFILE): run scripts/system_test.sh (or SKIP_SYSTEST=1)" >&2; exit 1; }
+fi
 VERSION=$(sed -n 's/^set(LTXAG_VERSION "\([0-9.]*\)")/\1/p' "$SRC/CMakeLists.txt")
 [ -n "$VERSION" ] || { echo "no LTXAG_VERSION in CMakeLists.txt" >&2; exit 1; }
 NAME="LTXAlphaGen-$VERSION"

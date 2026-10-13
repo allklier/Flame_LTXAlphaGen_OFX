@@ -351,6 +351,31 @@ licence.** v0.1 (2026-10-11) is the first release; see README.md for the user-fa
     python3 or Flame's; M1 Ultra: matmul fp16 17.5 / bf16 8.8 TFLOPS in PyTorch, 16.5 / 14.7 in
     MLX). The probe measures what PyTorch actually gets.
 
+**Testing**
+- **67.** **System test before every release package** (DECIDED, user 2026-10-13: testing in Flame
+  takes too long for every change; `systest/README.md`). A small OFX host of our own
+  (`systest/host/`, target `ltxag_systest`) loads the bundle like Flame and runs end-to-end
+  scenarios with the real job.py and worker underneath. User choices: **two tiers**, `fast` = the
+  dummy worker on a **dev build** (release builds compile the dummy out; no test switch in
+  shipping code), `full` = the **real model on the exact release bundle**; **our own Flame-like
+  host** rather than OpenFX HostSupport (echoes every plugin setValue as `instanceChanged`,
+  flags nesting > 32 as the recursion that crashed Flame, applies off-thread param changes only
+  at the next interaction, keeps the output RGBA, scripted Yes/No answers); **fake progress
+  windows** from the harness instead of a product switch (`systest/fake_ui.py` as `zenity` on
+  PATH / as the compiled Swift helper in the test HOME; Cancel = the fake exits 1, so job.py's
+  real cancel path runs); an **orchestrator** (`scripts/system_test.sh`) runs Linux and macOS in
+  parallel over ssh (detached, `DONE` marker), collects JUnit XML + logs into
+  `dist/systest/<commit>/`, and writes a per-platform `PASS` only for both tiers on a clean
+  checkout; `package_release*.sh` refuse to package without it (`SKIP_SYSTEST=1` overrides).
+  **When it runs** (user, 2026-10-13): the fast tier after every completed feature (a working
+  rule for Claude, see "Conventions"; no git hook); the full tier as part of each release, via
+  this separate PASS gate (packaging does not run the test itself).
+  Each run gets an isolated HOME (config, cache, logs, worker socket); `ltx_python`/`model_dir`
+  and the prompt embedding come read-only from the real user's setup. Checked by mutation: an
+  unconditional label write in `changedParam` fails with the recursion error, a 50% overlay fails
+  every frame. Not covered: Setup/Download, the Flame hook, layout, blend weights (the dummy matte
+  is the same in every chunk), OCIO with the real model.
+
 ## Architecture (as built)
 
 ```
@@ -697,8 +722,11 @@ process per run incl. model load, Gemma loaded and freed in process):
   `worker_roundtrip`, `cache`, `marker_log` (marker, overlay, log format), `vram_estimate` (every
   measurement covered), `load_bundle`. Against the real model on a GPU machine:
   `tools/worker_smoke.py`, `job_real_smoke.py`, `resident_smoke.py`, `setup_smoke.sh`. All are
-  host-free: re-entrancy bugs like the setValue recursion would need a fake OFX host (not built),
-  so they are found by testing in Flame.
+  host-free.
+- **System test (decision 67, `systest/README.md`):** `scripts/system_test.sh` (both platforms,
+  before packaging), or `systest/run_all.sh` / `systest/run_systest.sh` on one machine. The
+  Flame-like host catches re-entrancy bugs like the setValue recursion; host-specific behaviour
+  that it does not imitate is still found by testing in Flame.
 - **Installer:** `packaging/install.sh` installs the bundle into `/usr/OFX/Plugins` (macOS:
   `/Library/OFX/Plugins`, and it removes the download quarantine flag; the bundle is only
   ad-hoc signed, not notarised) and the hook
@@ -770,6 +798,14 @@ process per run incl. model load, Gemma loaded and freed in process):
 - Ask the maintainer rather than assume when a request has two readings.
 - Testing has two layers: the unit tests, and a demonstration of each requirement (in Flame for
   anything host-related). Passing unit tests alone is not evidence.
+- **Fast system test after every feature** (decision 67): before reporting a feature or fix as
+  done, run `TIERS=fast scripts/system_test.sh` on both platforms (the invocation is in
+  `CLAUDE.local.md`) and include its results in the report. A failure means the feature is not
+  done. If a machine can't be reached, say which tier and platform was not run and why; don't
+  call the work done without it. The full tier belongs to the release (next point).
+- **Release packages only after a full pass** (decision 67): commit, run `scripts/system_test.sh`
+  (both tiers, both platforms) on the clean commit, then `package_release*.sh`, which check for
+  the recorded `PASS`. Check the Mac for other GPU jobs before the full tier.
 - Keep this file current: record decisions with their numbers and reasons, move items between
   PROPOSED/OPEN/DECIDED, and add dead ends to the list above. Nothing machine- or person-specific:
   that goes in `CLAUDE.local.md`.
