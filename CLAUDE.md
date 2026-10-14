@@ -87,7 +87,7 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
 37/52 layout · 38 licence + model gate · 41 caption labels · 44 markers · 46 paths logged as-is ·
 48 RGBA output · 56 memory warning and record · 58 matte overlay · 59 SETUP REQUIRED on both
 outputs · 62 Merge (Smooth in C++) · 63 ROI = source alpha · 64/65 C++ platform layer and macOS
-memory · 68 effective precision (fp16).
+memory · 68 effective precision (fp16) · 71 processed record: pass-through or failed render.
 
 **In `worker/CLAUDE.md`:** 8/23/27/28/54 input colour (OCIO in the worker) · 9 prompt cache ·
 24 padding · 33 idle timeout · 55 resident transformer only with Unload off · 56 VRAM record
@@ -97,7 +97,7 @@ memory · 68 effective precision (fp16).
 Setup · 51 reuse existing downloads · 57 no bundled Python packages · 60 uv-managed Python 3.14.7
 · 66 link instead of copy · 68 fp16 probe and copy (macOS).
 
-**In `flame_hook/CLAUDE.md`:** 49 auto-refresh via a Flame Python hook.
+**In `flame_hook/CLAUDE.md`:** 49 auto-refresh via a Flame Python hook · 70 mattes as shelf media (shelved).
 
 ## Model and runtime facts
 

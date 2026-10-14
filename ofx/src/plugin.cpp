@@ -482,6 +482,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
     std::vector<float> matte;
     std::string message, caption;
+    bool passThrough = false;  // never processed: source + white matte (decision 71)
+    bool failRender = false;   // processed, but no matte: loud marker, then fail the render
     const OfxRectI db = out->getBounds();
     OfxRectI sb = db;
     std::unique_ptr<OFX::Image> src;
@@ -515,7 +517,14 @@ class AlphaGenEffect : public OFX::ImageEffect {
         } else if (isPending(cacheRoot(), key)) {
           message = "Processing: this frame is not ready yet.";
           caption = "PROCESSING";
+        } else if (!processedBefore()) {
+          message = "Not processed: press Process.";
+          caption = "NOT PROCESSED";
+          passThrough = true;
         } else {
+          // Decision 71: this node had mattes, so a miss must not pass silently through a
+          // big setup (cache purged or swept, another machine, source or settings changed).
+          failRender = true;
           const std::string status = lastJobStatus();
           const std::string state = jsonField(status, "state");
           if (state == "failed") {
@@ -526,8 +535,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
             message = "Processing was cancelled. Press Process to try again.";
             caption = "CANCELLED";
           } else {
-            message = "Not processed: press Process.";
-            caption = "NOT PROCESSED";
+            message = "Matte missing: no cached matte for this frame (cache purged, another "
+                      "machine, or the source or settings changed since Process). Press Process.";
+            caption = "MATTE MISSING";
           }
         }
         LOGD("render t=%g key=%s %s", args.time, key.c_str(),
@@ -537,17 +547,21 @@ class AlphaGenEffect : public OFX::ImageEffect {
 
     const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;  // source frame size (the matte's size)
     const bool realMatte = !matte.empty();  // before drawMarker() fills it with the marker
-    if (matte.empty()) {
+    if (passThrough) {
+      matte.assign(size_t(w) * h, 1.0f);
+    } else if (matte.empty()) {
       bool marker = true;
       showMarker_->getValue(marker);
-      if (marker) drawMarker(matte, w, h, caption);
+      if (marker || failRender) drawMarker(matte, w, h, caption);
     }
+    const bool loud = setupRequired || failRender;  // the marker on the image output too
     // Flame always gives an RGBA output and shows it as an image output plus a matte output
     // (decision 43 attempt failed). Decision 48: the alpha (Flame's matte output) carries the
     // matte or marker. Decision 58: the image is the source with the matte overlaid in magenta
     // at 30% (overlayPixel, marker.h); frames without a matte show the plain source, except
     // SETUP REQUIRED, which shows the marker on the image too (decision 59: a node viewed on its
-    // image output must not look like a working pass-through). A 1-channel output gets the matte.
+    // image output must not look like a working pass-through), and a missing matte on a
+    // processed node (decision 71). A 1-channel output gets the matte.
     const bool rgbFromSource = src && src->getPixelDepth() == OFX::eBitDepthFloat;
     const OfxRectI& win = args.renderWindow;
     const int comps = dst_->getPixelComponents() == OFX::ePixelComponentRGBA  ? 4
@@ -572,7 +586,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
         const float* sp = (rgbFromSource && inside)
                               ? static_cast<const float*>(src->getPixelAddress(x, y))
                               : nullptr;
-        if (setupRequired) {
+        if (loud) {
           px[0] = px[1] = px[2] = v;  // the marker, grey on black
         } else {
           static const float kBlack[3] = {0.0f, 0.0f, 0.0f};
@@ -586,9 +600,14 @@ class AlphaGenEffect : public OFX::ImageEffect {
       if (caption.empty())
         clearPersistentMessage();
       else
-        setPersistentMessage(OFX::Message::eMessageWarning, "", message);
+        setPersistentMessage(failRender ? OFX::Message::eMessageError : OFX::Message::eMessageWarning,
+                             "", message);
     } catch (const std::exception& e) {
       LOGW("render: persistent message FAILED: %s", e.what());
+    }
+    if (failRender) {  // after filling the output, in case the host shows it anyway
+      LOGD("render t=%g: %s, failing the render (decision 71)", args.time, caption.c_str());
+      OFX::throwSuiteStatusException(kOfxStatFailed);
     }
   }
 
@@ -810,6 +829,15 @@ class AlphaGenEffect : public OFX::ImageEffect {
     RoiState st = parseRoiState(v);
     if (st.valid && st.settings != roiSettings()) st.valid = false;
     return st;
+  }
+
+  // Decision 71: roiState doubles as the record that this node was processed. Every launched
+  // Process writes it (since 0.1.3), it is saved with the setup and copied with the node, and
+  // Purge Cache (node) clears it.
+  bool processedBefore() {
+    std::string v;
+    roiState_->getValue(v);
+    return !v.empty();
   }
 
   std::string lastJobStatus() {
@@ -1252,6 +1280,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     }
     const size_t n = purgeKeys(cacheRoot(), keys);
     LOGI("purgeNode: %zu of %zu frames had cached mattes, removed", n, keys.size());
+    setIfChanged(roiState_, "");  // back to never processed: pass-through (decision 71)
     setIfChanged(status_, "Cache purged: " + std::to_string(n) + " frames");
     refreshCacheInfo();
   }
@@ -1510,8 +1539,9 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
           gMain);
     place(*label(kPStatus, "Status", "Not processed"), gMain);
     auto* marker = labelled(desc.defineBooleanParam(kPShowMarker), "Show Marker",
-                            "Draw a faint 'NOT PROCESSED' marker on frames without a matte. Off: "
-                            "such frames are plain black.");
+                            "Draw a faint marker (PROCESSING, NOT CONNECTED) on frames without a "
+                            "matte. Off: such frames are plain black. A missing matte on a "
+                            "processed node always shows MATTE MISSING.");
     marker->setDefault(true);
     place(*marker, gMain);
 

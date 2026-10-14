@@ -319,6 +319,21 @@ void checkMarker(const Rendered& r, const std::string& what) {
             " mean " + std::to_string(s.mean) + ")");
 }
 
+// Decision 71: a processed node without a matte fails the render, after filling both outputs
+// with the marker (grey on black, as SETUP REQUIRED).
+void checkFailed(const Rendered& r, const std::string& what) {
+  CHECK(r.status == kOfxStatFailed, what + ": render status " + std::to_string(r.status) + ", expected failed");
+  const AlphaStats s = alphaStats(r);
+  CHECK(s.min >= 0.0f && s.max > 0.05f && s.max < 0.5f && s.mean < 0.2, what + ": alpha is not the marker");
+  bool grey = true;
+  for (int y = 0; y < r.h; ++y)
+    for (int x = 0; x < r.w; ++x) {
+      const float* p = r.px(x, y);
+      if (p[0] != p[3] || p[1] != p[3] || p[2] != p[3]) grey = false;
+    }
+  CHECK(grey, what + ": image output = the marker");
+}
+
 // RGB = the source with the matte overlaid in magenta at 30% (decision 58).
 float overlay(float src, float m, int k) { return src * (1.0f - 0.3f * m) + (k == 1 ? 0.0f : 0.3f * m); }
 
@@ -471,7 +486,9 @@ void testNotProcessed(Ctx& c) {
   c.readyConfig(in.get());
   const Rendered r = in->render(3);
   CHECK(contains(in->persistent, "Not processed"), "footer: " + in->persistent);
-  checkMarker(r, "NOT PROCESSED");
+  CHECK(r.status == kOfxStatOK, "never processed: render ok");
+  const AlphaStats a = alphaStats(r);
+  CHECK(a.min == 1.0f && a.max == 1.0f, "never processed: white matte (decision 71)");
   std::vector<float> src(size_t(sc.w) * sc.h * 4);
   sc.frame(3, src);
   float worst = 0;
@@ -479,9 +496,6 @@ void testNotProcessed(Ctx& c) {
     for (int x = 0; x < r.w; ++x)
       for (int k = 0; k < 3; ++k) worst = std::max(worst, std::fabs(r.px(x, y)[k] - src[(size_t(y) * sc.w + x) * 4 + k]));
   CHECK(worst == 0.0f, "image output is the plain source without a matte (decision 58), error " + std::to_string(worst));
-  in->setBool("showMarker", false);
-  const AlphaStats s = alphaStats(in->render(3));
-  CHECK(s.max == 0.0f && s.min == 0.0f, "Show Marker off: plain black alpha");
 }
 
 void testProcess(Ctx& c) {
@@ -526,19 +540,27 @@ void testProcess(Ctx& c) {
 
   // The colour space is part of the cache key.
   in->setInt("colourSpace", 2);
-  in->render(5);
-  CHECK(contains(in->persistent, "Not processed"), "another colour space misses the cache: " + in->persistent);
+  checkFailed(in->render(5), "another colour space on a processed node");
+  CHECK(contains(in->persistent, "Matte missing"), "another colour space misses the cache: " + in->persistent);
   in->setInt("colourSpace", 0);
   in->render(5);
   CHECK(in->persistent.empty(), "back to Bypass: cache hit again");
 
   // Purge Cache (this node), then Purge All.
-  in->press("purgeCache");
-  CHECK(contains(in->getString("status"), "Cache purged: 50 frames"), "purge status: " + in->getString("status"));
-  in->render(5);
-  CHECK(contains(in->persistent, "Not processed"), "purged frame not processed: " + in->persistent);
+  // Purge All (or a swept or missing cache): the node still remembers it was processed.
   in->press("purgeAll");
   CHECK(in->getString("cacheInfo") == "0.0 GB used", "purge all: " + in->getString("cacheInfo"));
+  checkFailed(in->render(5), "processed node, cache gone");
+  CHECK(contains(in->persistent, "Matte missing"), "footer: " + in->persistent);
+  in->setBool("showMarker", false);
+  checkFailed(in->render(5), "Show Marker off does not hide MATTE MISSING");
+  in->setBool("showMarker", true);
+  // Purge Cache (this node) resets it to never processed: pass-through.
+  in->press("purgeCache");
+  CHECK(contains(in->getString("status"), "Cache purged"), "purge status: " + in->getString("status"));
+  const Rendered r = in->render(5);
+  CHECK(r.status == kOfxStatOK && alphaStats(r).min == 1.0f, "purged node passes through with a white matte");
+  CHECK(contains(in->persistent, "Not processed"), "purged frame not processed: " + in->persistent);
 }
 
 void testRoi(Ctx& c) {
@@ -572,8 +594,8 @@ void testRoi(Ctx& c) {
   in->setBool("roiLimit", false);
   // Black Out Outside ROI changes the matte: the old result no longer counts.
   in->setBool("roiMaskOutside", true);
-  in->render(8);
-  CHECK(contains(in->persistent, "Not processed"), "changed ROI settings need Process: " + in->persistent);
+  checkFailed(in->render(8), "changed ROI settings");
+  CHECK(contains(in->persistent, "Matte missing"), "changed ROI settings need Process: " + in->persistent);
   j = runJob(*in, c.jobTimeout());
   REQUIRE(j.state == "done", "black-out job " + j.state);
   checkMatte(in->render(8), sc, 8,
@@ -615,7 +637,7 @@ void testCancel(Ctx& c) {
   }
   in->render(3);
   CHECK(contains(in->persistent, "cancelled"), "footer after cancel: " + in->persistent);
-  checkMarker(in->render(3), "CANCELLED");
+  checkFailed(in->render(3), "CANCELLED");
   checkClean(*in);
   clearFakeUi();
 }
@@ -637,7 +659,7 @@ void testFailures(Ctx& c) {
           "failure message: " + j.message);
     in->render(2);
     CHECK(contains(in->persistent, "Processing failed"), "footer: " + in->persistent);
-    checkMarker(in->render(2), "FAILED");
+    checkFailed(in->render(2), "FAILED");
     checkClean(*in);
     note("simulate " + std::to_string(k.sim) + ": " + j.message);
     closeMacDialogs();

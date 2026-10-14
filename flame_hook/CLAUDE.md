@@ -19,6 +19,22 @@ macOS: the hook takes the bundle from `/Library/OFX/Plugins`; `/opt/Autodesk/sha
 there too (world-writable) and Flame 2027.2 on the Mac loads hooks from it (plugin logs 2026-10-13:
 the hook loaded and auto-refresh worked).
 
+## Decision 70: mattes as media on the Batch Renders shelf (discussed, shelved; user, 2026-10-13)
+
+The idea: keep each matte as Flame media (visible in the project, archived with it) instead of
+the plugin's disk cache (decision 36), and have the node show that media on its output.
+- OFX has no API to write into Flame's library or reels, nor to read a Flame clip. Only the hook
+  could import: `flame.import_clips(path, destination)` (`<flame>/python_utilities/examples/
+  watch_folder.py:88`), `flame.batch.import_clip(path, reel_name)` / `import_clips(paths,
+  reel_name)` (`examples/import_file_using_custom_dialog.py:46,55`); Logik Portal creates batch
+  groups with `shelf_reels=['Batch Renders']`. UNVERIFIED: importing onto a shelf reel by name.
+- The node could mirror the clip only if Flame soft-imports (references our EXRs, not a copy in
+  its own storage); whether that holds, and whether an archive takes unmanaged media, depends on
+  project and archive settings (UNVERIFIED). The hook also can't tell which node a job came from.
+- **Shelved:** too many open questions about where and how media is saved. To get mattes as media,
+  pair the node with a Render or Write File node, which are built for that. No known precedent of
+  an OFX node mirroring a shelf clip.
+
 ## Flame's Python (verified on Flame 2027.1/2027.2, Rocky Linux 9.7)
 
 - Hook modules load from `/opt/Autodesk/shared/python` (world-writable; other tools install there

@@ -43,8 +43,8 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   Flame names "Setup" after the 2nd OFX page.
 - **41.** Plain string fields get a caption label above them ("Token used HH:MM, not stored").
 - **44.** Frames without a matte show a faint "no media"-style marker in the matte output: stripes
-  at 0.08, caption at 0.30 (NOT PROCESSED / PROCESSING / FAILED / CANCELLED / SETUP REQUIRED / NOT
-  CONNECTED / NOT SUPPORTED). "Show Marker" off gives plain black.
+  at 0.08, caption at 0.30 (PROCESSING / NOT CONNECTED / NOT SUPPORTED; "Show Marker" off gives
+  plain black), and, always drawn, SETUP REQUIRED / MATTE MISSING / FAILED / CANCELLED (59, 71).
 - **46.** Paths logged as-is; Collect Logs asks users to review the bundle. **48.** Flame forces an
   RGBA output; alpha (Flame's matte output) carries the matte or marker.
 - **58.** **Image output = matte overlay:** source × (1 − 0.3·m) + magenta (1, 0, 1) × 0.3·m per RGB
@@ -52,6 +52,14 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   without a matte show the plain source. Render-only: the cache key is unchanged.
 - **59.** **SETUP REQUIRED shows on both outputs** (image = the marker, grey on black), so a node
   viewed on its image output doesn't look like a working pass-through (0.1.1).
+- **71.** **Processed record** (DECIDED, user, 2026-10-13): never processed → source + white matte
+  (footer "Not processed"). Processed and no matte (purged/swept, another machine, source or
+  settings changed, failed/cancelled job) → MATTE MISSING etc. on both outputs, an error footer,
+  then `render` throws `kOfxStatFailed`, so a buried node can't fail silently. The record is the
+  hidden `roiState` (written by every launched Process since 0.1.3, saved and copied with the
+  node); Purge Cache (node) clears it. A duplicate errors too: a copy shares every param, and a
+  content record couldn't tell it from an upstream change (user chose the error). How Flame
+  shows a failed render, and whether Batch Render stops: UNVERIFIED (test in Flame).
 - **PROCESSING race (49):** the plugin writes the frames' pending markers itself (Flame's pid)
   just before launching; job.py rewrites them with its pid. Otherwise Flame's render right after
   the button press beat job.py (~50 ms) and showed NOT PROCESSED for the whole job. The plugin's

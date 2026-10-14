@@ -140,8 +140,8 @@ Flame never waits on the model. The plugin is split into two parts:
 2. A **Python background process** on the same machine that loads the model and does the
    inference.
 
-Processing never starts by itself. Frames without a matte show a faint marker (for example
-`NOT PROCESSED`). Press **Process** and the plugin stages the clip and starts a separate job with
+Processing never starts by itself. A node that was never processed passes its source through
+with a white matte. Press **Process** and the plugin stages the clip and starts a separate job with
 its own progress window and a Cancel button. When the job finishes, the viewer refreshes by
 itself and shows the matte. Mattes are cached on disk per frame, so revisiting, re-rendering and
 Batch Render are instant.
@@ -160,7 +160,11 @@ Batch Render are instant.
 - The model sees display-referred images. Camera log and ACEScg footage is converted for the
   model with OCIO (see **Input Colour**); your source and output are not changed.
 - Mattes are cached per source frame and settings. Changing Input Colour or Precision gives a
-  new matte (the marker shows again until you process), and switching back finds the earlier one.
+  new matte (`MATTE MISSING` until you process), and switching back finds the earlier one.
+- **A processed node never passes through silently.** If its matte is missing (the cache was
+  purged or swept, the setup moved to another machine, or the source changed upstream), both
+  outputs show `MATTE MISSING` and the render fails, so a node deep in a setup gets noticed.
+  Press Process to make the mattes again; **Purge Cache** returns the node to pass-through.
 
 ## Installation
 
