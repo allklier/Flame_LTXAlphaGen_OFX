@@ -140,9 +140,10 @@ Not checked: Cancel / close button (exit 1), the look. On macOS job.py runs unde
 ## macOS: the MPS worker (decision 65)
 
 - Upstream LTX-2 supports Apple Silicon (`mps-sdpa` attention, an MPS LoRA-fuse path, eager
-  neighbourhood attention without natten), and our lockfile resolves for macOS, so the Mac drives
-  the same `ICLoraPipeline`. No measured MPS-vs-MLX data for diffusion transformers exists;
-  op-level benchmarks put MLX at most ~2× ahead.
+  neighbourhood attention without natten) and our lockfile resolves for macOS: same `ICLoraPipeline`.
+- **`tools/mac_bench.py`** (TFLOPS, PyTorch / MLX): M1 Ultra matmul fp16 17.5 / 16.5, bf16 8.8 / 14.7.
+  M5 Ultra 80c (2026-10-14): within 3 % in fp16 = bf16 (matmul ~115, attention ~90), so PyTorch
+  reaches the Neural Accelerators in bf16; MLX leads only in fp32 (~75 vs 28). No speed case for MLX.
 - **Measured on the M1 Ultra** (128 GB, 96 GB Metal working set, torch 2.14.1, `worker_smoke`,
   bf16, 2026-10-12):
 
@@ -153,11 +154,23 @@ Not checked: Cancel / close button (exit 1), the look. On macOS job.py runs unde
   | HD × 73 | 406 s | 2120 s (265 s/step) | ~220 s | 2861 s | 79.7 GB | 0.0030 |
 
   ~50 s per new HD frame; HD × 145 would need ~115 GB and ~2.2 h. CUDA: HD × 60 in 85 s.
+- **HD × 73 estimates** (UNVERIFIED, 2026-10-14). Steps scale by `mac_bench` matmul; M2/M3 = M1's 83 %
+  of shader peak (Apple spec, recalled: 21/27/28 TFLOPS), bf16; encode/decode by shader peak (upper
+  bound, no conv3d data). Blackwell: HD × 65 profile scaled; runs HD × 49/97/145 took 73/143/240 s.
+
+  | Machine | Precision | Encode | Steps (8) | Decode | Job |
+  |---|---|---|---|---|---|
+  | M1 Ultra 64c | fp16 | 406 s | ~1510 s | ~220 s | ~38 min |
+  | M2 Ultra 76c | bf16 | ~315 s | ~1170 s | ~170 s | ~30 min |
+  | M3 Ultra 80c | bf16 | ~300 s | ~1120 s | ~165 s | ~28 min |
+  | M5 Ultra 80c | bf16 | ~60–190 s | ~160–240 s | ~30–100 s | ~6–10 min |
+  | RTX PRO 6000 Blackwell (Linux) | fp8 or bf16 | ~2 s | ~71 s | ~12 s | ~1.5–2 min |
 - **Encode dtype:** M1 has no fast bf16 (conv3d bf16 0.40 TFLOPS vs fp32 0.92, fp16 4.74 but NaN
-  in the VAE encoder even with PixelNorm in fp32; matmul bf16 8.9, fp16 16.4, fp32 13.0). `pick_encode_dtype` times one Conv3d (128→128, k3, 1×128×5×64×64) in bf16
-  and fp32 at engine start and encodes in the faster (tie → bf16), logged as `reference encode in
-  <dtype> (conv3d probe: …)`. M1 Ultra: bf16 43 ms, fp32 20 ms → fp32 in 5 of 5 runs, probe 0.43 s;
-  285 → 126 s at 720p × 49, same matte. An M2+ choosing bf16: UNVERIFIED.
+  in the VAE encoder even with PixelNorm in fp32; matmul bf16 8.9, fp16 16.4, fp32 13.0).
+  `pick_encode_dtype` times one Conv3d (128→128, k3, 1×128×5×64×64) in bf16 and fp32 at engine
+  start and encodes in the faster (tie → bf16), logged as `reference encode in <dtype> (conv3d
+  probe: …)`. M1 Ultra: bf16 43 ms, fp32 20 ms → fp32 in 5 of 5 runs, probe 0.43 s; 285 → 126 s
+  at 720p × 49, same matte. An M2+ choosing bf16: UNVERIFIED.
 - **Cancel:** the worker dies within 0.2 s of SIGKILL, but **submitted GPU work runs on** (~20 s
   at 100 %). The encode wrapper calls `torch.mps.synchronize()` after every `nn.Conv3d` (forward
   hooks): same latent (max diff 0.0), same time (85.5 vs 86.4 s at 720p × 33), GPU idle ~3 s after
@@ -173,13 +186,11 @@ Not checked: Cancel / close button (exit 1), the look. On macOS job.py runs unde
   both; fp16 vs bf16 mean difference 0.00024 (99th percentile 0.0015); steps 54.6 → 38.9 s (1.40×),
   job 692 → 583 s (1.19×). Casting at load (`Builder.build(dtype=fp16)`) held ~26 GB more (78.5 vs
   52.7 GB) and loaded slower; an fp16 copy loads like the bf16 file (52.3 GB both), so Setup
-  writes an **fp16 copy** (42 GB, `helper/CLAUDE.md`). Worker
-  precision "fp16" = the bf16 pipeline with transformer, denoising state, prompt embedding and
-  reference latent in fp16, VAE decode in bf16; a missing copy is an error (34). `fp16.py`:
-  `probe` (4096² matmul bf16 vs fp16) and `convert` (streaming BF16 → F16, F32 tables and metadata
-  kept). Per Mac, not per chip: M2–M4 have native bf16; M5's Neural Accelerators take fp16 not
-  bf16, and whether PyTorch reaches them is open (`tools/mac_bench.py`; M1 Ultra matmul fp16 17.5 /
-  bf16 8.8 TFLOPS in PyTorch, 16.5 / 14.7 in MLX).
+  writes an **fp16 copy** (42 GB, `helper/CLAUDE.md`). Worker precision "fp16" = the bf16 pipeline
+  with transformer, denoising state, prompt embedding and reference latent in fp16, VAE decode in
+  bf16; a missing copy is an error (34). `fp16.py`: `probe` (4096² matmul bf16 vs fp16) and
+  `convert` (streaming BF16 → F16, F32 tables and metadata kept). Per Mac, not per chip: M2–M4
+  have native bf16 (UNVERIFIED by us), M5 runs bf16 as fast as fp16 (`mac_bench` above): no copy.
 
 ## Dead ends: don't retry
 

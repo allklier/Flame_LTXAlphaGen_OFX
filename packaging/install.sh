@@ -15,12 +15,14 @@ BUNDLE=LTXAlphaGen.ofx.bundle
 HOOK_DIR=/opt/Autodesk/shared/python
 HOOK=ltx_alphagen_hook.py
 HOOK_SIGNATURE="LTX Alpha Gen: Flame Python hook"  # first line of our hook's docstring
+VERSION=dev  # set by scripts/package_release*.sh
 
 die() { echo "error: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run with sudo (it writes to $PLUGINS)"
 if pgrep -x flame >/dev/null 2>&1; then
-  echo "warning: Flame is running. Quit Flame, then run this again." >&2
+  [ "${1:-}" = "--uninstall" ] && what="NOT UNINSTALLED" || what="NOT INSTALLED"
+  echo "$what: Flame is running. Quit Flame, then run this again. Nothing was changed." >&2
   exit 1
 fi
 
@@ -52,7 +54,11 @@ hook_is_ours || die "$HOOK_DIR/$HOOK exists and is not the LTX Alpha Gen hook; n
 
 mkdir -p "$PLUGINS"
 if [ -e "$PLUGINS/$BUNDLE" ] || [ -L "$PLUGINS/$BUNDLE" ]; then
-  echo "replacing $PLUGINS/$BUNDLE"
+  if [ -L "$PLUGINS/$BUNDLE" ]; then
+    echo "replacing the link $PLUGINS/$BUNDLE -> $(readlink "$PLUGINS/$BUNDLE")"
+  else
+    echo "replacing $PLUGINS/$BUNDLE"
+  fi
   rm -rf "${PLUGINS:?}/$BUNDLE"
 fi
 cp -R "$HERE/$BUNDLE" "$PLUGINS/"
@@ -69,4 +75,4 @@ else
   echo "warning: $HOOK_DIR does not exist (is Flame installed?). The plugin works without the hook," >&2
   echo "         but the viewer will not refresh by itself when a job finishes." >&2
 fi
-echo "Done. Start Flame; the node is under LTX > LTX Alpha Gen. Then run Setup on its Setup tab."
+echo "Done: LTX Alpha Gen $VERSION installed. Start Flame; the node is under LTX > LTX Alpha Gen. Then run Setup on its Setup tab."

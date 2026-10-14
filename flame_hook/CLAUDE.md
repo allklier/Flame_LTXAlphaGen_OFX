@@ -16,7 +16,8 @@ refresh. Markers older than an hour are swept (no hook installed). Tested agains
 module in `worker/tests/test_hook.py`.
 
 macOS: the hook takes the bundle from `/Library/OFX/Plugins`; `/opt/Autodesk/shared/python` exists
-there too (world-writable, empty), but that Flame loads hooks from it on the Mac is UNVERIFIED.
+there too (world-writable) and Flame 2027.2 on the Mac loads hooks from it (plugin logs 2026-10-13:
+the hook loaded and auto-refresh worked).
 
 ## Flame's Python (verified on Flame 2027.1/2027.2, Rocky Linux 9.7)
 

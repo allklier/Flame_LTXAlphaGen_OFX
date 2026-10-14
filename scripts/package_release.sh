@@ -32,7 +32,8 @@ ssh "$HOST" "set -e; cd $REMOTE
   (cd release && ctest --output-on-failure >/dev/null) || { echo 'ctest failed' >&2; exit 1; }
   rm -rf dist/$NAME && mkdir -p dist/$NAME
   cp -R release/LTXAlphaGen.ofx.bundle dist/$NAME/
-  install -m 0755 src/packaging/install.sh dist/$NAME/install.sh
+  sed 's/^VERSION=dev /VERSION=$VERSION /' src/packaging/install.sh > dist/$NAME/install.sh
+  chmod 0755 dist/$NAME/install.sh
   cp src/README.md src/LICENSE dist/$NAME/
   find dist/$NAME -name __pycache__ -prune -exec rm -rf {} +
   tar -C dist -czf dist/$NAME-rocky9.tar.gz $NAME

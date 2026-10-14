@@ -154,7 +154,8 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; **legal read before a pu
 - **Installer:** `packaging/install.sh` puts the bundle in `/usr/OFX/Plugins` (macOS:
   `/Library/OFX/Plugins`, removing the quarantine flag) and the hook in
   `/opt/Autodesk/shared/python`; refuses to replace a hook file that isn't ours; `--uninstall`;
-  replaces a symlinked dev install with a copy.
+  replaces a symlinked dev install with a copy (says so); "NOT INSTALLED" while Flame runs; prints
+  the version the package scripts stamp into it (`VERSION=dev` unpackaged).
 
 ## Roadmap (after v0.1)
 
@@ -168,8 +169,9 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; **legal read before a pu
 - An offline install of the Python packages (decision 57).
 - Optional: an A/B of recipe 2 (`alpha_gen.py`: dev transformer, 30 steps; its negative prompt is
   unused at cfg 1.0) on hair/smoke; the previous chunk's matte as conditioning for seams.
-- **MLX port** (branch `macos-mlx`): from scratch, no community port code (user, 2026-10-12:
-  learning, and one licence set, LTX's); `mlx/PORT_MAP.md`.
+- **MLX port** (a new branch from `main`): from scratch, no community port code (user, 2026-10-12:
+  learning, and one licence set, LTX's); `mlx/PORT_MAP.md`. M5 Ultra benchmark (2026-10-14):
+  no speed gain over PyTorch in fp16/bf16 (`worker/CLAUDE.md`).
 
 ## Dead ends (cross-cutting; module ones are in the module files)
 

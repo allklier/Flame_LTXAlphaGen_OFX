@@ -1,8 +1,8 @@
 """fp16 transformer on Apple Silicon (decision 68). Runs in the LTX venv (needs torch).
 
 probe(): times a transformer-sized matmul in bf16 and fp16 on MPS. The M1 has no fast bf16
-(fp16 measured 1.40x faster per denoising step); M2-M4 have native bf16; M5's GPU Neural
-Accelerators take fp16 but not bf16. Setup makes the fp16 copy only where fp16 is faster.
+(fp16 measured 1.40x faster per denoising step); M2-M4 have native bf16; on M5 PyTorch runs
+bf16 as fast as fp16 (mac_bench). Setup makes the fp16 copy only where fp16 is faster.
 
 convert(): writes an fp16 copy of the bf16 transformer checkpoint, tensor by tensor (constant
 memory). BF16 tensors become F16, the F32 scale/shift tables and the metadata (model config) are
