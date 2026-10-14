@@ -8,7 +8,7 @@ and what a from-scratch MLX port has to rebuild. Written 2026-10-12 from reading
 the safetensors headers; no code has been ported yet.
 
 Citations: `core/` = `packages/ltx-core/src/ltx_core`, `pipe/` = `packages/ltx-pipelines/src/ltx_pipelines`
-(on akflame5 under `/Volumes/Data2/ltx-alphagen/ltx2/`). **V** = verified in code or header,
+(in the LTX runtime Setup installs, `<runtime>/ltx2/`). **V** = verified in code or header,
 **I** = inferred, **UNVERIFIED** = needs checking (mostly MLX facts: no MLX installed yet).
 
 ## 1. Scope: our configuration
@@ -141,7 +141,7 @@ V, `diffusion_video_decoder.py`, class `NADiffusionDecoder`, 417 M parameters. *
 
 ## 7. Prompt embedding
 
-Our cache (V, `prompt-empty.safetensors` on akflame5): `video_encoding` (1,1024,4096) bf16,
+Our cache (V, `prompt-empty.safetensors`): `video_encoding` (1,1024,4096) bf16,
 `audio_encoding` (1,1024,2048) bf16, `attention_mask` (1,1024) i64 (not used by the DiT).
 It is the connector output, so the Mac needs **no Gemma and no connector** while the prompt is
 empty. **OPEN:** how a Mac user gets this file: (a) port Gemma 4 12B + the connectors (a large
