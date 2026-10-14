@@ -47,6 +47,12 @@
 #include "user_config.h"
 #include "vram_estimate.h"
 
+#ifndef LTXAG_VERSION  // from CMakeLists.txt
+#define LTXAG_VERSION "0.0.0"
+#endif
+#ifndef LTXAG_GIT
+#define LTXAG_GIT "unknown"
+#endif
 #ifndef LTXAG_VERSION_MAJOR  // from CMakeLists.txt LTXAG_VERSION
 #define LTXAG_VERSION_MAJOR 0
 #define LTXAG_VERSION_MINOR 0
@@ -1635,12 +1641,9 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     // --- Spacers (decision 52): Flame ignores page membership and starts a new tab only when
     // the current one passes 6 columns. One blank column fills tab 1 (Alpha Gen,
     // Performance, Chunking, ROI, Cache + 1), so Licence/Models overflow to tab 2, which Flame names after
-    // the next page ("Setup"). Each spacer holds one blank label so Flame cannot drop it.
-    for (int i = 0; i < 1; ++i) {
-      const std::string g = "grpSpacer" + std::to_string(i);
-      const std::string l = "spacer" + std::to_string(i);
-      place(*label(l.c_str(), " ", ""), group(g.c_str(), " ", main));
-    }
+    // the next page ("Setup"). The spacer holds one label so Flame cannot drop it: the version,
+    // so a test in Flame shows which build is loaded.
+    place(*label("version", "Version", LTXAG_VERSION " (" LTXAG_GIT ")"), group("grpSpacer0", " ", main));
 
     // --- Licence (5 rows, per user) ---
     auto* gLic = group("grpLicence", "Licence", setupPage);

@@ -14,6 +14,9 @@ rsync -a --delete --exclude .git --exclude build --exclude __pycache__ \
   "$SRC/" "$HOST:$REMOTE/src/"
 # Release UI by default (user, 2026-10-11: no Prototype page from test 3 on); DEV_BUILD=ON for dev.
 DEV_BUILD=${DEV_BUILD:-OFF}
-ssh "$HOST" "set -e; cd $REMOTE && cmake -S src -B build -DCMAKE_BUILD_TYPE=Release -DLTXAG_DEV_BUILD=$DEV_BUILD >/dev/null \
+# The copy has no .git: name the build after this checkout (Version label, log snapshot).
+GIT=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo nogit)
+[ -n "$(git -C "$SRC" status --porcelain 2>/dev/null)" ] && GIT="$GIT-dirty"
+ssh "$HOST" "set -e; cd $REMOTE && cmake -S src -B build -DCMAKE_BUILD_TYPE=Release -DLTXAG_DEV_BUILD=$DEV_BUILD -DLTXAG_GIT=$GIT >/dev/null \
   && cmake --build build -j 8 2>&1 | grep -E 'error|warning' || true; \
   cd build && ctest --output-on-failure"

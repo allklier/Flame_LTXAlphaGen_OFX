@@ -401,7 +401,7 @@ const std::vector<std::string> kExpectedParams = {
     "existingModels", "setupStatus", "debugLogging", "collectLogs", "chunkSize", "mergeMode", "roiMargin",
     "roiMaskOutside", "roiLimit", "roiInfo", "cacheDir", "cacheInfo", "purgeCache", "purgeAll", "simSeconds",
     "simulate", "simNeedGB", "pythonPath", "enforceGate", "autoRefresh", "useDummy", "initialized", "nodeId",
-    "refreshTick", "roiState"};
+    "refreshTick", "roiState", "version"};
 
 void testDescribe(Ctx& c) {
   OfxPlugin* p = c.host->plugin();
@@ -423,6 +423,13 @@ void testDescribe(Ctx& c) {
     if (!d.params.byName.count(n)) continue;
     const int secret = d.params.byName[n]->props.getInt(kOfxParamPropSecret);
     CHECK(secret == (c.dev ? 0 : 1), std::string(n) + (c.dev ? " visible in a dev build" : " hidden in a release build"));
+  }
+  if (d.params.byName.count("version")) {
+    const std::string v = d.params.byName["version"]->props.getStr(kOfxParamPropDefault, 0);
+    CHECK(contains(v, std::to_string(p->pluginVersionMajor) + "." + std::to_string(p->pluginVersionMinor) + ".") &&
+              contains(v, "("),
+          "Version label shows version and git: " + v);
+    note("version label: " + v);
   }
   note(std::string(c.dev ? "dev" : "release") + " build, " + std::to_string(d.params.list.size()) + " params");
 }

@@ -39,7 +39,8 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
 ## UI and outputs
 
 - **37/52.** Layout follows Flame's rules (below). Tab 1: Alpha Gen, Performance, Chunking, ROI,
-  Cache + one blank spacer column (6 columns), so Licence, Models, Support overflow to tab 2, which
+  Cache + a spacer column holding the Version label ("0.2.0 (git hash)", so a Flame test shows
+  which build is loaded) (6 columns), so Licence, Models, Support overflow to tab 2, which
   Flame names "Setup" after the 2nd OFX page.
 - **41.** Plain string fields get a caption label above them ("Token used HH:MM, not stored").
 - **44.** Frames without a matte show a faint "no media"-style marker in the matte output: stripes
