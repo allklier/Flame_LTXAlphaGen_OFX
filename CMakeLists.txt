@@ -12,9 +12,10 @@ option(LTXAG_DEV_BUILD "Prototype/test build: Prototype page, bypassable licence
 # Release version (v0.1 = first release 2026-10-11; 0.1.1 = SETUP REQUIRED on the image output;
 # 0.1.2 = runtime on uv's own pinned Python + C compiler check; 0.1.3 = Chunk Size, Merge, ROI;
 # 0.1.4 = macOS on Apple Silicon (PyTorch-MPS), link to existing models, Setup refresh, Cancel;
-# 0.1.5 = fp16 transformer on Macs where it is faster, system test before releases).
+# 0.1.5 = fp16 transformer on Macs where it is faster, system test before releases;
+# 0.2.0 = MATTE MISSING for processed nodes (71), 6K refused with advice (72), install.sh messages).
 # Also the OFX plugin version (major.minor) and the release package name.
-set(LTXAG_VERSION "0.1.5")
+set(LTXAG_VERSION "0.2.0")
 string(REPLACE "." ";" LTXAG_VERSION_PARTS "${LTXAG_VERSION}")
 list(GET LTXAG_VERSION_PARTS 0 LTXAG_VERSION_MAJOR)
 list(GET LTXAG_VERSION_PARTS 1 LTXAG_VERSION_MINOR)
