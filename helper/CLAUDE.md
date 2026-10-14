@@ -21,7 +21,7 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
 - **57.** **No bundled Python packages.** Licences would allow torch etc. (not the LTX code;
   NVIDIA's CUDA wheels have their own terms), but the venv is 6.4 GB (CUDA libs 3.1, torch 1.1,
   triton 0.7): bundling moves those bytes into our release, past GitHub's 2 GB per-file limit, and
-  ties the plugin to one torch/CUDA/Python. Later option: an offline install from a package folder.
+  ties the plugin to one torch/CUDA/Python. An offline install from a package folder: not planned until needed (user, 2026-10-14).
 - **60.** **uv's own Python, pinned (3.14.7), never a system Python.** LTX-2 asks only for ≥ 3.10,
   so uv picked a user's system 3.12, and without `python3.12-devel` Triton's C build failed at the
   prompt cache step (`Python.h: No such file`). Setup runs `uv sync --managed-python --python

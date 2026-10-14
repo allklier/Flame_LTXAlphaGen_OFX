@@ -76,7 +76,9 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
 
 ## Chunks, merge, ROI
 
-- **26.** No resolution cap, no scaling in the OFX; VRAM is the only limit.
+- **26.** No scaling in the OFX; VRAM is the limit, except **72**: Process refuses a crop whose
+  long side is ≥ 6000 px (6K, `kMaxLongSide`) with "scale outside the node or use the ROI"; the
+  worker reports the decoder's refusal below that as `too_large` (`worker/CLAUDE.md`).
 - **30/61.** Chunk Size dropdown **Auto, Full 145, Half 73, Quarter 33** (user 2026-10-12;
   `kSizeLen`/`kSizeOverlap` in `chunk_plan.h`), all 8n+1 (33 is the nearest valid quarter; a test
   checks it). Overlap goes with the size, 24 / 16 / 12. **Auto** (default) takes the longest size
@@ -122,7 +124,7 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   - **Record (built):** the manifest carries estimate, free, total, resident, reserve, model size,
     GPU, driver, warned; the worker's `vram` line and job.py's `logs/vram_stats.csv` row are in
     `worker/CLAUDE.md`.
-  - **Step 2, local correction (PROPOSED):** one factor per precision = median(observed /
+  - **Step 2, local correction (not planned until needed, user 2026-10-14):** one factor per precision = median(observed /
     predicted) over successful runs; inactive below ~10 runs; clamped ~0.8–1.3; falls slowly, rises
     fast after an OOM or near-OOM; in the user config, logged, with a "Reset estimate" action.
   - **Caveat:** a success only bounds the need from above, an OOM from below; use allocated /

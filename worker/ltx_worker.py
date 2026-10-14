@@ -512,6 +512,9 @@ def classify(exc: BaseException) -> tuple[str, str]:
         return "oom", f"out of GPU memory: {str(exc).splitlines()[0]}"
     if isinstance(exc, FileNotFoundError):
         return "input", str(exc)
+    if isinstance(exc, ValueError) and "Cannot fit a DiffVAE decode tile" in str(exc):  # decision 72
+        return "too_large", ("frame too large for the LTX decoder: scale the clip down before the node "
+                             "and the matte up after it, or limit the region of interest with an alpha")
     first = str(exc).splitlines()[0] if str(exc) else ""
     return "internal", f"{type(exc).__name__}: {first}"
 

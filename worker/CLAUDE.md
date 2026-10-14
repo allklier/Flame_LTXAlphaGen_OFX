@@ -34,7 +34,7 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   notes and the code refer to that commit.
 - **Licensing:** entities with ≥ USD 10M revenue need a paid Lightricks licence (§2.1; Setup tab
   and README say so); the full `LICENSE-2_x` ships as `helper/licence.txt`; the README mentions
-  AI-content disclosure; **get a legal read before a public release.**
+  AI-content disclosure. No separate legal read (closed by the user, 2026-10-14).
 
 ## Images (decisions 8/23/27/28/54, 24)
 
@@ -95,9 +95,13 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   counter: all frames of a chunk are denoised together.
 - **Verified:** `worker_smoke` HD 60 bf16 error 0.0029 vs truth; `job_real_smoke` (200 frames, 2
   chunks) max error 0.0026; good mattes on real footage in Flame.
-- **6K:** the DiffVAE decode planner refuses (`diffusion_tiling.py:402`; minimum tile 80 frames,
-  `chunked_eager`); not a real OOM. Leads: the conv VAE `ltx-2.5-video-vae-conv-bf16` (1.45 GB),
-  `--diffvae-optimization`, the pipeline's `--tile`.
+- **72. No 6K (won't do; user, 2026-10-14).** 6144×3264 fails in ~12 s, before inference: the
+  DiffVAE decode planner (`ic_lora.py:486` → `diffusion_tiling.py:402`) holds whole-clip stage-4
+  features (× 49: 42.4 of 55.3 GB usable; × 25: 27.0 of 70.7) and finds no tile (min 80f × 320²).
+  The transformer would also be slow (× 49 ≈ 274k tokens, ~4–5 min/step on the Blackwell, est.).
+  Users scale down and up outside the node, or crop with the ROI (63). Process refuses a long
+  side ≥ 6000 px (`ofx/CLAUDE.md` 26); `classify` turns the planner's refusal into `too_large`. Unexplored: the conv VAE
+  `ltx-2.5-video-vae-conv-bf16` (1.45 GB), short 6K chunks, `--diffvae-optimization`, `--tile`.
 
 ## Resident worker (decisions 11/19/33/55)
 

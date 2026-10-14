@@ -1,5 +1,8 @@
 # LTX-2.5 Alpha Gen on MLX: port map (B1)
 
+**The MLX port is dropped** (user, 2026-10-14; decision 65): on an M5 Ultra PyTorch-MPS matches
+MLX in fp16/bf16 (`worker/CLAUDE.md`). Kept as a reference for how the model works.
+
 What our worker actually runs, traced through the LTX-2 source at the pinned commit `9ec55f9`,
 and what a from-scratch MLX port has to rebuild. Written 2026-10-12 from reading the code and
 the safetensors headers; no code has been ported yet.

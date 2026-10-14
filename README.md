@@ -90,7 +90,8 @@ following the guidelines at https://github.com/flamelogik
 
   fp8 saves about 17 GB with no speed cost. Expect roughly 1.6 s per HD frame. Keeping the model
   loaded between jobs (Unload GPU off) needs more: about 57 GB for HD at 145 frames in fp8.
-  6K is currently not supported. A 24 GB card is too small; on a 48 GB card use fp8.
+  6K is not supported: scale the clip down before the node and the matte up after it, or use a
+  region of interest (the source alpha) so the processed area fits. A 24 GB card is too small; on a 48 GB card use fp8.
 - About **80 GB of disk** in the Model Folder (73 GB of model files plus the ~7 GB LTX runtime),
   plus space for the matte cache (about 4 MB per HD frame).
 - Internet access during Setup (Hugging Face, GitHub, PyPI). After Setup, processing runs offline.
@@ -444,13 +445,9 @@ logging and Collect Logs.
 
 ### On the roadmap
 
-- 6K and larger frames (the decoder refuses them).
 - Disk staging for very long clips. The whole clip is staged in `/dev/shm` (about 12.5 MB per HD
   frame), which limits very long or very large clips.
 - Processing only the frames that are not cached yet. Process always processes the whole clip.
-- Background Reactor rendering is untested (Batch Render works).
-- An offline install of the Python packages for workstations without internet.
-- A native MLX (Metal) implementation for macOS, if it turns out clearly faster than PyTorch.
 
 ## Support and logs
 

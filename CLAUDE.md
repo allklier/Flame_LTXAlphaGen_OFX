@@ -74,16 +74,18 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
   Python `worker/ltxag_worker/oslayer.py`. The inference backend (torch vs MLX) is a separate
   axis: the worker line protocol and the manifest are its boundary, so an MLX worker speaks the
   same protocol (a `backend` manifest field and cache-key part would come with it).
-- **65.** macOS ships on **PyTorch-MPS** first; a from-scratch MLX port comes later, only if it
-  clearly beats MPS (`mlx/PORT_MAP.md`). Detail: `worker/CLAUDE.md`, `ofx/CLAUDE.md`.
+- **65.** macOS runs on **PyTorch-MPS**. A from-scratch MLX port was to follow only if it clearly
+  beat MPS; **dropped** (user, 2026-10-14: the M5 benchmark shows no gain, `worker/CLAUDE.md`);
+  `mlx/PORT_MAP.md` stays as a model reference. Detail: `worker/CLAUDE.md`, `ofx/CLAUDE.md`.
 - **67.** **System test**: a Flame-like OFX host of our own; fast tier (dev build, dummy) after
   every feature, both tiers (full = release build, real model) before every release package
   (`systest/README.md`, "Conventions").
-- **69.** CLAUDE.md split per module (user, 2026-10-13: keep each under ~200 lines); no hidden
+- **69.** CLAUDE.md split per module (user: keep each under ~250 lines, 2026-10-14; not a to-do
+  below that); no hidden
   documentation files (no `.claude/rules/`).
 
 **In `ofx/CLAUDE.md`:** 11/19 Unload GPU param · 12/32 VRAM reserve · 18/21 three-level defaults ·
-26 no resolution cap · 30/61 chunks and Chunk Size · 34 no silent downgrade · 36 disk cache ·
+26/72 resolution limit (6K refused) · 30/61 chunks and Chunk Size · 34 no silent downgrade · 36 disk cache ·
 37/52 layout · 38 licence + model gate · 41 caption labels · 44 markers · 46 paths logged as-is ·
 48 RGBA output · 56 memory warning and record · 58 matte overlay · 59 SETUP REQUIRED on both
 outputs · 62 Merge (Smooth in C++) · 63 ROI = source alpha · 64/65 C++ platform layer and macOS
@@ -91,7 +93,7 @@ memory · 68 effective precision (fp16) · 71 processed record: pass-through or 
 
 **In `worker/CLAUDE.md`:** 8/23/27/28/54 input colour (OCIO in the worker) · 9 prompt cache ·
 24 padding · 33 idle timeout · 55 resident transformer only with Unload off · 56 VRAM record
-(worker side) · 62 Flow Warp · 64 Python OS layer · 65 MPS worker · 68 fp16 worker.
+(worker side) · 62 Flow Warp · 64 Python OS layer · 65 MPS worker · 68 fp16 worker · 72 no 6K (won't do).
 
 **In `helper/CLAUDE.md`:** 2/13/20 Setup downloads, token used once · 7 LTX packages installed by
 Setup · 51 reuse existing downloads · 57 no bundled Python packages · 60 uv-managed Python 3.14.7
@@ -103,7 +105,7 @@ Setup · 51 reuse existing downloads · 57 no bundled Python packages · 60 uv-m
 
 In `worker/CLAUDE.md`: the model (Alpha Gen IC-LoRA on LTX-2.5-22B), its limits, the required
 files (~73 GB), the pinned stack (LTX-2 `9ec55f9`, torch 2.13.0+cu132 / 2.14.1 on macOS) and the
-LTX licence terms (paid licence at ≥ USD 10M revenue; **legal read before a public release**).
+LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: closed by the user, 2026-10-14).
 
 ## Logging (decision 39)
 
@@ -159,19 +161,13 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; **legal read before a pu
 
 ## Roadmap (after v0.1)
 
-- **6K:** try the conv VAE / DiffVAE modes / `--tile` (`worker/CLAUDE.md`).
 - Large jobs: disk staging when `/dev/shm` is too small; skip already-cached chunks.
 - **48 GB cards:** Chunk Size (61) built; HD fp8 × 145 needs ~42 of ~45 GB, so Half/Quarter should
   fit (`vram_stats.csv` would confirm). Ada runs fp8-cast (Triton upcast needs sm_89+,
   `ltx_core/quantization/fp8_cast.py:62-95`); Ada speed and natten kernels UNVERIFIED.
-- Background Reactor check (`hostIsBackground`, cached mattes).
-- Decision 56 step 2 (local estimate correction), once `vram_stats.csv` data exists.
-- An offline install of the Python packages (decision 57).
-- Optional: an A/B of recipe 2 (`alpha_gen.py`: dev transformer, 30 steps; its negative prompt is
-  unused at cfg 1.0) on hair/smoke; the previous chunk's matte as conditioning for seams.
-- **MLX port** (a new branch from `main`): from scratch, no community port code (user, 2026-10-12:
-  learning, and one licence set, LTX's); `mlx/PORT_MAP.md`. M5 Ultra benchmark (2026-10-14):
-  no speed gain over PyTorch in fp16/bf16 (`worker/CLAUDE.md`).
+- Not planned until needed (user, 2026-10-14): decision 56 step 2, an offline install of the
+  Python packages (57), an A/B of recipe 2 (`alpha_gen.py`: dev transformer, 30 steps), the
+  Background Reactor check. Won't do: the MLX port (65), 6K frames (72).
 
 ## Dead ends (cross-cutting; module ones are in the module files)
 
@@ -198,4 +194,4 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; **legal read before a pu
   the recorded `PASS`. Check the Mac for other GPU jobs before the full tier.
 - Keep these files current: record decisions with their numbers and reasons in the module file
   (and a line in the index above), move items between PROPOSED/OPEN/DECIDED, add dead ends. Keep
-  each file under ~200 lines. Nothing machine- or person-specific: that goes in `CLAUDE.local.md`.
+  each file under ~250 lines. Nothing machine- or person-specific: that goes in `CLAUDE.local.md`.

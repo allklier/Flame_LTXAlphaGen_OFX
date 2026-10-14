@@ -67,6 +67,9 @@ constexpr const char* kDummyVersion = "dummy-0.3";
 
 // Decision 34(a): bf16 is the built-in default only if a full HD chunk fits (vram_estimate.h).
 constexpr int kDefaultCheckW = 1920, kDefaultCheckH = 1080, kDefaultCheckFrames = 145;
+// Decision 72: Process refuses a crop whose long side reaches this (every 6K-class format;
+// 3840x2176 is measured to work, 6144x3264 fails in the LTX decoder).
+constexpr int kMaxLongSide = 6000;
 
 const char* const kColourSpaces[] = {"Bypass", "ACEScg", "LogC4", "Log3G10", "LogC3", "BMD Film Gen5"};
 const char* const kPrecisions[] = {"bf16", "fp8"};
@@ -994,6 +997,13 @@ class AlphaGenEffect : public OFX::ImageEffect {
     std::string err;
     if (!computeRoi(first, n, fullW, fullH, roi, err)) return error(err);
     const bool useRoi = roi.active;
+    // Decision 72: no 6K. Checked on what the model sees (the crop), before anything is staged.
+    if (std::max(roi.box.w, roi.box.h) >= kMaxLongSide)
+      return error(std::string(useRoi ? "The region of interest" : "The frame") + " is " +
+                   std::to_string(roi.box.w) + "x" + std::to_string(roi.box.h) +
+                   ": too large for the LTX model (6K and above are not supported). Scale the clip "
+                   "down before this node and the matte up after it, or give the source an alpha "
+                   "that limits the region of interest.");
     int prec = 0, chunkMode = 0, mergeMode = 0;
     bool unload = true;
     double head = 0.0;

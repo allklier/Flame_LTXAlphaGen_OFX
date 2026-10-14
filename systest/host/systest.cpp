@@ -670,6 +670,25 @@ void testFailures(Ctx& c) {
   in->setInt("simulate", 0);
 }
 
+// Decision 72: a 6K crop is refused at Process with advice; an alpha ROI that crops it to a
+// smaller box processes normally.
+void testTooLarge(Ctx& c) {
+  c.readyConfig();
+  Scene full{6144, 3264, 1, AlphaMode::Opaque};
+  auto in = c.node(full);
+  c.readyConfig(in.get());
+  Job j = runJob(*in, c.jobTimeout());
+  CHECK(j.state == "none", "6K full frame: no job launched (" + j.state + ")");
+  CHECK(contains(j.message, "6144x3264") && contains(j.message, "6K") && contains(j.message, "region of interest"),
+        "6K refusal names the size and the way out: " + j.message);
+  Scene roi{6144, 3264, 1, AlphaMode::Roi, 0.3};
+  auto in2 = c.node(roi);
+  c.readyConfig(in2.get());
+  j = runJob(*in2, c.jobTimeout());
+  CHECK(j.state == "done", "6K frame with a small alpha ROI processes: " + j.state + " " + j.message);
+  note("ROI crop " + in2->getString("roiInfo"));
+}
+
 void testMemoryWarning(Ctx& c) {
   c.readyConfig();
   Scene sc{320, 240, 9, AlphaMode::Opaque};
@@ -920,7 +939,7 @@ int main(int argc, char** argv) {
       {"describe", testDescribe},     {"create_instance", testCreate},   {"gate", testGate},
       {"not_processed", testNotProcessed}, {"process_chunks_merge_purge", testProcess},
       {"roi", testRoi},               {"cancel", testCancel},            {"failures", testFailures},
-      {"memory_warning", testMemoryWarning}, {"save_default", testDefaults}, {"mac_fp8_refused", testMacFp8},
+      {"too_large", testTooLarge},    {"memory_warning", testMemoryWarning}, {"save_default", testDefaults}, {"mac_fp8_refused", testMacFp8},
       {"collect_logs", testCollectLogs}};
   const std::vector<Test> full = {
       {"describe", testDescribe}, {"release_gate", testFullGate}, {"real_matte", testRealMatte},
