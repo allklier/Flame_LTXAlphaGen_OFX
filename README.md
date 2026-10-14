@@ -21,14 +21,15 @@ matte:
 | Machine | Precision | Encode | Steps (8) | Decode | Total |
 |---|---|---|---|---|---|
 | NVIDIA RTX PRO 6000 Blackwell (Linux) | fp8 or bf16 | ~2 s | ~71 s | ~12 s | ~1.5–2 min |
+| NVIDIA RTX A6000 48 GB (Linux) | fp8 | — | — | — | ~4.7–5 min |
 | Mac Studio M5 Ultra, 80-core GPU | bf16 | ~60–190 s | ~160–240 s | ~30–100 s | ~6–10 min |
 | Mac Studio M3 Ultra, 80-core GPU | bf16 | ~300 s | ~1120 s | ~165 s | ~28 min |
 | Mac Studio M2 Ultra, 76-core GPU | bf16 | ~315 s | ~1170 s | ~170 s | ~30 min |
 | Mac Studio M1 Ultra, 64-core GPU | fp16 | 406 s | ~1510 s | ~220 s | ~38 min |
 
-These are estimates. The Blackwell and M1 Ultra figures are based on measured runs. The M2, M3 and
-M5 figures are worked out from GPU benchmarks and Apple's specifications, and nobody has run the
-plugin on those Macs yet. Macs need at least 128 GB of memory for this clip.
+These are estimates. The Blackwell, RTX A6000 and M1 Ultra figures are based on measured runs.
+The M2, M3 and M5 figures are worked out from GPU benchmarks and Apple's specifications, and nobody
+has run the plugin on those Macs yet. Macs need at least 128 GB of memory for this clip.
 
 ## Quick Start
 

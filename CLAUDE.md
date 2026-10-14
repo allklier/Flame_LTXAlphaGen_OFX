@@ -162,9 +162,11 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
 ## Roadmap (after v0.1)
 
 - Large jobs: disk staging when `/dev/shm` is too small; skip already-cached chunks.
-- **48 GB cards:** Chunk Size (61) built; HD fp8 × 145 needs ~42 of ~45 GB, so Half/Quarter should
-  fit (`vram_stats.csv` would confirm). Ada runs fp8-cast (Triton upcast needs sm_89+,
-  `ltx_core/quantization/fp8_cast.py:62-95`); Ada speed and natten kernels UNVERIFIED.
+- **48 GB cards:** answered by a user's RTX A6000 (Ampere, 2026-10-14, `ofx/CLAUDE.md`): fp8
+  HD × 73 used 29.4–29.9 GB, bf16 Quarter 41.5 GB (3.2 GB left); fp8 Full 145 (est. 42.2 of 42.1
+  available) not tried. fp8-cast runs before Ada too: below sm_89 it skips the Triton rounding
+  kernel and upcasts with `weight.to(dtype)` (`ltx_core/quantization/fp8_cast.py:62-95`). Ada
+  speed UNVERIFIED.
 - Not planned until needed (user, 2026-10-14): decision 56 step 2, an offline install of the
   Python packages (57), an A/B of recipe 2 (`alpha_gen.py`: dev transformer, 30 steps), the
   Background Reactor check. Won't do: the MLX port (65), 6K frames (72).

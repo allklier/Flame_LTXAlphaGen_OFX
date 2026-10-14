@@ -142,6 +142,11 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   | 6144×3264 | 49 / 25 | — | fails | — |
 
   fp8 saves ~17 GB at no speed cost; HD needs ~0.145 GB and ~1.6 s per frame.
+- **RTX A6000 48 GB** (Ampere, a user's `vram_stats.csv`, plugin 0.1.2/0.1.3, 2026-10-12/14):
+  fp8 HD × 73 estimated 31.5, used 29.4–29.9 GB (4 runs), 268–290 s per chunk (~2.7× the
+  Blackwell); bf16 HD Quarter (33) estimated 42.8, used 41.5 GB, lowest free 3.2 GB, ~115 s per
+  chunk. The estimate is 1.2–2 GB high here (safe); its warnings for fp8 Full 145 (42.2 vs 42.1)
+  and bf16 Half (48.7 vs 41.0) were declined, so those are untested.
 - **Estimate** (`test_vram_estimate`): need = 19.5 GB (fp8) or 36.8 GB (bf16) + 0.0718 GB per
   Mpx·frame of the padded largest chunk + 0.70 GB per Mpx above HD + 1 GB; within 0.4 GB at HD.
 - **Resident refit:** with the transformer kept, later chunks run the reference encode on top of
