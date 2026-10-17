@@ -52,6 +52,17 @@ def pad_temporal(frames: np.ndarray) -> np.ndarray:
     return np.concatenate([frames, frames[idx]], axis=0)
 
 
+def hold_indices(n: int, hold: int) -> list[int]:
+    """Frame Hold (decision 74): frame 0 once (the VAE encodes it alone), every later frame
+    `hold` times, so one 8-frame latent group spans 8/hold source frames instead of 8."""
+    return [0] + [i for i in range(1, n) for _ in range(hold)]
+
+
+def held_output_indices(n: int, hold: int) -> list[int]:
+    """The decoded frame kept for each source frame: frame 0, then the middle copy of each hold."""
+    return [0] + [1 + hold * (i - 1) + hold // 2 for i in range(1, n)]
+
+
 def crop(mattes: np.ndarray, n: int, top: int, left: int, h: int, w: int) -> np.ndarray:
     """Undo both paddings: (N',H',W') -> (n,h,w)."""
     return mattes[:n, top : top + h, left : left + w]

@@ -156,12 +156,14 @@ struct Scene {
   int w, h, n;
   AlphaMode alpha;
   double size = 1.0;  // < 1: a smaller subject that moves less (leaves room for an ROI crop)
+  double jump = 0.0;  // > 0: in the second half the disc jumps this many px back and forth per frame
   // Disc of frame f: centre and radius (pixels, row 0 = top).
   void disc(int f, double& cx, double& cy, double& r) const {
     const double t = double(f) / std::max(1, n - 1);
     cx = w * (0.5 + size * 0.5 * (t - 0.5));
     cy = h * (0.5 + size * 0.15 * std::sin(6.28 * t));
     r = size * 0.22 * std::min(w, h);
+    if (jump > 0 && f >= n / 2) cx += (f % 2 ? 0.5 : -0.5) * jump;
   }
   float truth(int f, int x, int y) const {
     double cx, cy, r;
@@ -399,7 +401,7 @@ const std::vector<std::string> kExpectedParams = {
     "colourSpace", "process", "status", "showMarker", "precision", "unloadAfterRun", "headroomGB",
     "saveAsDefault", "viewLicence", "acceptLicence", "tokenCaption", "hfToken", "download", "modelDir",
     "existingModels", "setupStatus", "debugLogging", "collectLogs", "chunkSize", "mergeMode", "roiMargin",
-    "roiMaskOutside", "roiLimit", "roiInfo", "cacheDir", "cacheInfo", "purgeCache", "purgeAll", "simSeconds",
+    "roiMaskOutside", "roiLimit", "roiInfo", "cacheDir", "cacheInfo", "purgeCache", "purgeAll", "frameHold", "simSeconds",
     "simulate", "simNeedGB", "pythonPath", "enforceGate", "autoRefresh", "useDummy", "initialized", "nodeId",
     "refreshTick", "roiState", "version"};
 
@@ -553,6 +555,21 @@ void testProcess(Ctx& c) {
   in->render(5);
   CHECK(in->persistent.empty(), "back to Bypass: cache hit again");
 
+  // Frame Hold (decision 74) is part of the key (Off keeps the old one); 2x halves a chunk's
+  // source frames: Quarter 33 -> 17 frames, overlap 6 -> 4 chunks for 50 frames.
+  in->setInt("frameHold", 2);  // Off, Auto, 2x, 4x, 8x
+  checkFailed(in->render(5), "2x frame hold on a processed node");
+  CHECK(contains(in->persistent, "Matte missing"), "2x frame hold misses the cache: " + in->persistent);
+  j = runJob(*in, c.jobTimeout());
+  REQUIRE(j.state == "done", "2x frame hold job " + j.state + " " + j.message);
+  CHECK(jsonField(j.json, "chunks") == "4", "2x frame hold: four chunks: " + jsonField(j.json, "chunks"));
+  for (int f : {0, 17, 49})
+    checkMatte(in->render(f), sc, f, [](const float* s, int, int) { return luma(s); }, 4e-3f,
+               "2x frame hold frame " + std::to_string(f));
+  in->setInt("frameHold", 0);
+  in->render(5);
+  CHECK(in->persistent.empty(), "frame hold Off: the earlier mattes hit again");
+
   // Purge Cache (this node), then Purge All.
   // Purge All (or a swept or missing cache): the node still remembers it was processed.
   in->press("purgeAll");
@@ -568,6 +585,48 @@ void testProcess(Ctx& c) {
   const Rendered r = in->render(5);
   CHECK(r.status == kOfxStatOK && alphaStats(r).min == 1.0f, "purged node passes through with a white matte");
   CHECK(contains(in->persistent, "Not processed"), "purged frame not processed: " + in->persistent);
+}
+
+// Decision 75: Auto Frame Hold measures the motion while staging and holds only the chunks that
+// need it. A clip whose second half jumps 60 px per frame gets 1x and 4x chunks; a slow clip gets
+// the Off plan.
+void testAutoHold(Ctx& c) {
+  c.readyConfig();
+  const std::string logPath = home() + "/.cache/ltx-alphagen/logs/ltx-alphagen.log";
+  auto planLine = [&]() {
+    const std::string log = readFile(logPath);
+    const size_t pos = log.rfind("auto hold: motion px/frame");
+    return pos == std::string::npos ? std::string() : log.substr(pos, log.find('\n', pos) - pos);
+  };
+  Scene fast{320, 240, 50, AlphaMode::Opaque};
+  fast.jump = 60.0;
+  auto in = c.node(fast);
+  c.readyConfig(in.get());
+  in->setInt("chunkSize", 3);  // Quarter: 33 model frames per chunk
+  in->setInt("frameHold", 1);  // Auto
+  Job j = runJob(*in, c.jobTimeout());
+  REQUIRE(j.state == "done", "auto hold job " + j.state + " " + j.message);
+  std::string line = planLine();
+  note(line);
+  CHECK(contains(line, "@1x") && contains(line, "@4x"), "fast second half: 1x and 4x chunks: " + line);
+  CHECK(std::atoi(jsonField(j.json, "chunks").c_str()) > 2, "more chunks than Off: " + jsonField(j.json, "chunks"));
+  CHECK(contains(fakeProgress(), "4x hold"), "progress window names the hold");
+  for (int f : {0, 20, 30, 49})
+    checkMatte(in->render(f), fast, f, [](const float* s, int, int) { return luma(s); }, 4e-3f,
+               "auto hold frame " + std::to_string(f));
+  checkClean(*in);
+
+  Scene slow{320, 240, 50, AlphaMode::Opaque};
+  auto in2 = c.node(slow);
+  in2->setInt("chunkSize", 3);
+  in2->setInt("frameHold", 1);
+  j = runJob(*in2, c.jobTimeout());
+  REQUIRE(j.state == "done", "auto hold slow job " + j.state + " " + j.message);
+  line = planLine();
+  note(line);
+  CHECK(jsonField(j.json, "chunks") == "2" && !contains(line, "@2x") && !contains(line, "@4x"),
+        "slow clip: the Off plan (2 chunks at 1x): " + line);
+  checkClean(*in2);
 }
 
 void testRoi(Ctx& c) {
@@ -945,6 +1004,7 @@ int main(int argc, char** argv) {
   const std::vector<Test> fast = {
       {"describe", testDescribe},     {"create_instance", testCreate},   {"gate", testGate},
       {"not_processed", testNotProcessed}, {"process_chunks_merge_purge", testProcess},
+      {"auto_hold", testAutoHold},
       {"roi", testRoi},               {"cancel", testCancel},            {"failures", testFailures},
       {"too_large", testTooLarge},    {"memory_warning", testMemoryWarning}, {"save_default", testDefaults}, {"mac_fp8_refused", testMacFp8},
       {"collect_logs", testCollectLogs}};

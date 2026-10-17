@@ -3,14 +3,14 @@
 Three modes:
   one-shot (job.py legacy / smoke tests):
       --in F --chunks s:l,... --out-prefix P --model-dir M --embeddings E
-      [--precision bf16|fp8] [--colour <colour.SOURCES key>] [--ocio-config C]
+      [--precision bf16|fp8] [--colour <colour.SOURCES key>] [--ocio-config C] [--hold K | --holds K,K,..]
       stdout lines as in dummy_worker.py: info / progress / chunk_done / done / error
   serve (resident worker, decisions 11/19/33):
       --serve SOCKET --model-dir M --embeddings E --precision P [--flame-pid N]
       [--idle-timeout S]
       Loads the model once, then serves jobs over a Unix socket. Each connection sends one
       JSON request line {"in", "chunks", "out_prefix", "colour", "ocio_config", "precision",
-      "model_dir", "unload", "seed"} and receives the same stdout-style lines back. A request
+      "model_dir", "unload", "seed", "holds"} and receives the same stdout-style lines back. A request
       whose precision/model_dir differ gets "restart" and the server exits, so the client
       starts a matching one. The server exits after a job with "unload": true, after
       --idle-timeout seconds without jobs (default 300; $LTXAG_IDLE_TIMEOUT overrides), or
@@ -423,7 +423,8 @@ class Engine:
     def vram_gb(self) -> float:
         return self.accel.reserved_gb()
 
-    def run(self, inp: str, chunks, out_prefix: str, conv: colour.Converter, emit, seed: int = SEED_DEFAULT):
+    def run(self, inp: str, chunks, out_prefix: str, conv: colour.Converter, emit, seed: int = SEED_DEFAULT,
+            holds=None):
         torch, accel = self.torch, self.accel
         emit("info", conv.describe())
         reserved_start = accel.reserved_gb()
@@ -438,7 +439,7 @@ class Engine:
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
         try:
-            self._run_chunks(inp, chunks, out_prefix, conv, emit, seed, min_free)
+            self._run_chunks(inp, chunks, out_prefix, conv, emit, seed, min_free, holds or [1] * len(chunks))
         finally:
             sampling.set()
             sampler.join()
@@ -447,9 +448,10 @@ class Engine:
                 emit("vram", f"{min_free[0]:.2f}", f"{self.job_peak[0]:.2f}", f"{self.job_peak[1]:.2f}",
                      f"{reserved_start:.2f}", torch.__version__)
 
-    def _run_chunks(self, inp, chunks, out_prefix, conv, emit, seed, min_free) -> None:  # noqa: ANN001
+    def _run_chunks(self, inp, chunks, out_prefix, conv, emit, seed, min_free, holds) -> None:  # noqa: ANN001
         torch, accel = self.torch, self.accel
         for i, (start, length) in enumerate(chunks):
+            hold = int(holds[i])
             label = f"chunk {i + 1}/{len(chunks)}"
             t0 = time.time()
             accel.reset_peaks()
@@ -457,6 +459,8 @@ class Engine:
             emit("stage", i, "converting" if conv.active else "preparing")
             frames = conv.apply(transport.read_frames_range(args_safe(inp), start, length))  # (n,h,w,3) f32
             n, h, w, _ = frames.shape
+            if hold > 1:  # decision 74: frame 0 once, then each frame `hold` times
+                frames = frames[padding.hold_indices(n, hold)]
             padded, (top, left) = padding.pad_spatial(frames)
             padded = padding.pad_temporal(padded)
             np_, hp, wp = padded.shape[0], padded.shape[1], padded.shape[2]
@@ -464,7 +468,8 @@ class Engine:
             if self.frames_on_gpu:
                 frames_t = frames_t.to(accel.device)
             MemoryFrameSource.frames = frames_t.clamp_(0.0, 1.0).mul_(255.0)
-            emit("info", f"{label}: in {n}x{w}x{h} -> model {np_}x{wp}x{hp} (input ready in {time.time() - t0:.1f} s)")
+            emit("info", f"{label}: in {n}x{w}x{h}{f' held {hold}x' if hold > 1 else ''} -> model {np_}x{wp}x{hp} "
+                         f"(input ready in {time.time() - t0:.1f} s)")
             emit("stage", i, "denoising")
 
             def on_step(k: int, steps: int, i: int = i) -> None:
@@ -488,6 +493,8 @@ class Engine:
             matte = v.mean(dim=-1).clamp_(0.0, 1.0).numpy()  # grayscale matte: average channels
             if matte.shape[1:] != (hp, wp):
                 raise RuntimeError(f"decoded size {matte.shape[1:]} != model size {(hp, wp)}")
+            if hold > 1:
+                matte = matte[padding.held_output_indices(n, hold)]
             transport.write_mattes(f"{out_prefix}_{i}.bin", padding.crop(matte, n, top, left, h, w))
             peak_a, peak_r = accel.peaks_gb()
             self.job_peak = [max(self.job_peak[0], peak_a), max(self.job_peak[1], peak_r)]
@@ -533,7 +540,8 @@ def one_shot(a) -> int:  # noqa: ANN001
         engine = Engine(a.model_dir, a.embeddings, a.precision, emit, keep_transformer=not a.rebuild_transformer,
                         frames_on_gpu=a.frames_on_gpu)
         engine.run(a.inp, [tuple(int(v) for v in c.split(":")) for c in a.chunks.split(",")],
-                   a.out_prefix, conv, emit, a.seed)
+                   a.out_prefix, conv, emit, a.seed,
+                   [int(k) for k in a.holds.split(",")] if a.holds else [a.hold] * len(a.chunks.split(",")))
     except Exception as exc:  # noqa: BLE001 - report everything, with traceback
         kind, msg = classify(exc)
         emit("error", kind, msg)
@@ -655,11 +663,11 @@ class Server:
         log.job = req.get("job_id", "-")
         t0 = time.time()
         log.info(f"job start (resident engine reused): chunks={req['chunks']} colour={req.get('colour')} "
-                 f"unload={req.get('unload')}")
+                 f"unload={req.get('unload')} holds={req.get('holds')}")
         try:
             conv = colour.Converter(req.get("colour", "Bypass"), req.get("ocio_config", ""))
             self.engine.run(req["in"], [tuple(c) for c in req["chunks"]], req["out_prefix"], conv, emit,
-                            int(req.get("seed", SEED_DEFAULT)))
+                            int(req.get("seed", SEED_DEFAULT)), req.get("holds"))
             emit("done")
             log.info(f"job done in {time.time() - t0:.1f} s")
         except Cancelled:
@@ -715,6 +723,8 @@ def main() -> int:
     ap.add_argument("--colour", default="Bypass", choices=list(colour.SOURCES))
     ap.add_argument("--ocio-config", default="")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
+    ap.add_argument("--hold", type=int, default=1, choices=[1, 2, 4, 8], help="Frame Hold for every chunk (74)")
+    ap.add_argument("--holds", default=None, help="Frame Hold per chunk, e.g. 1,4,1 (75)")
     ap.add_argument("--flame-pid", type=int, default=0)
     ap.add_argument("--idle-timeout", type=float, default=IDLE_TIMEOUT_DEFAULT)
     ap.add_argument("--rebuild-transformer", action="store_true", help="A/B: upstream behaviour, rebuild per chunk")

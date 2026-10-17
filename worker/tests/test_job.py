@@ -143,6 +143,23 @@ class TrackerTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_held_chunks_cost_model_frames(self):
+        # Decision 75: a 37-frame 4x chunk (145 model frames) costs as much as a 145-frame 1x one.
+        t = self.job.Tracker([[0, 145], [140, 37]], 177, [1, 4])
+        self.assertEqual(t.cost, [145, 145])
+        t.on_stage(0, "preparing")
+        self.now += 4
+        t.on_stage(0, "denoising")
+        for k in (1, 2):
+            self.now += 10
+            t.on_step(0, k, 8)
+        frac, text = t.render()
+        self.assertAlmostEqual(frac, (0.05 + 0.85 * 2 / 8) * 145 / 290)
+        self.assertIn("about 2:52 left", text)  # as two equal chunks: 74 s + 98 s
+        t.on_chunk_done(0)
+        t.on_stage(1, "preparing")
+        self.assertIn("Chunk 2/2 · frames 141–177 of 177 · 4x hold · preparing", t.render()[1])
+
     def test_line_and_estimate(self):
         t = self.job.Tracker([[0, 145], [120, 145]], 265)
         self.assertEqual(t.render(), (0.0, "Starting the worker · 0:00 elapsed"))

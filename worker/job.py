@@ -19,7 +19,8 @@ Status file <cache_root>/jobs/<job_id>.json is rewritten after every chunk (stat
 and at the end, so the plugin can follow progress.
 Real worker (manifest has worker_python): talks to the RESIDENT worker server over a Unix socket
 (ltx_worker.py --serve; decisions 11/19/33/55), starting it if none is running. Extra manifest
-fields: worker_socket, unload, flame_pid, colour, ocio_config, seed. Dummy worker: one subprocess
+fields: worker_socket, unload, flame_pid, colour, ocio_config, seed. holds[] (one per chunk, decisions
+74/75): the Frame Hold the worker applies; the progress weights chunks by model frames. Dummy worker: one subprocess
 per job, as before.
 Progress window (user request 2026-10-11): the worker's "stage"/"step" lines drive a Tracker;
 a 1 s ticker redraws "Chunk i/n · frames a–b of N · step k/8 · m:ss elapsed · about m:ss left",
@@ -94,9 +95,13 @@ class Tracker:
 
     DECODE_PER_STEP = 1.4  # decode time / one step time before a chunk has finished (HD profile: 10.5 / 7.5 s)
 
-    def __init__(self, chunks: list, frames: int) -> None:
+    def __init__(self, chunks: list, frames: int, holds: list | None = None) -> None:
         self.chunks, self.frames = chunks, frames
-        self.total = float(sum(n for _, n in chunks))
+        self.holds = list(holds) if holds else [1] * len(chunks)
+        # A chunk costs its model frames: with a Frame Hold (74/75) a short chunk can cost as much
+        # as a long one.
+        self.cost = [1 + k * (n - 1) for (_, n), k in zip(chunks, self.holds)]
+        self.total = float(sum(self.cost))
         self.t0 = time.time()
         self.lock = threading.Lock()
         self.status = "Starting the worker"
@@ -142,12 +147,11 @@ class Tracker:
     def _fraction(self) -> float:
         if self.chunk < 0:
             return 0.0
-        start, n = self.chunks[self.chunk]
         inner = {"converting": 0.0, "preparing": 0.0, "decoding": 0.9, "done": 1.0}.get(self.stage, 0.05)
         if self.stage == "denoising" and self.steps:
             inner = 0.05 + 0.85 * self.step / self.steps
-        before = sum(c[1] for c in self.chunks[: self.chunk])
-        return (before + inner * n) / self.total
+        before = sum(self.cost[: self.chunk])
+        return (before + inner * self.cost[self.chunk]) / self.total
 
     def _left(self) -> float | None:
         if not self.step_times or self.chunk < 0:
@@ -156,7 +160,7 @@ class Tracker:
         steps = self.steps or 8
         post = self.post if self.post is not None else self.DECODE_PER_STEP * step
         pre = self.pre or 0.0
-        n_cur = self.chunks[self.chunk][1]
+        cost_cur = self.cost[self.chunk]
         if self.stage in ("converting", "preparing"):
             cur = pre + steps * step + post
         elif self.stage == "denoising":
@@ -165,7 +169,7 @@ class Tracker:
             cur = max(0.0, post - (time.time() - self.last_step_t))
         else:
             cur = 0.0
-        later = sum((pre + steps * step + post) * c[1] / n_cur for c in self.chunks[self.chunk + 1:])
+        later = sum((pre + steps * step + post) * c / cost_cur for c in self.cost[self.chunk + 1:])
         return cur + later
 
     def render(self) -> tuple[float, str]:
@@ -176,6 +180,8 @@ class Tracker:
             start, n = self.chunks[self.chunk]
             parts = [f"Chunk {self.chunk + 1}/{len(self.chunks)}",
                      f"frames {start + 1}–{start + n} of {self.frames}"]
+            if self.holds[self.chunk] > 1:
+                parts.append(f"{self.holds[self.chunk]}x hold")
             if self.stage == "denoising":
                 parts.append(f"step {self.step}/{self.steps}" if self.steps else "starting")
             elif self.stage:
@@ -448,13 +454,14 @@ def main() -> int:
     cache.mark_pending(root, keys, os.getpid())
     t_start = time.time()
     log.info(f"start: {m['frames']} frames {m['width']}x{m['height']}, chunks={chunks}, "
-             f"merge={merge} roi={roi} precision={m['precision']} simulate={m['simulate']} sim_seconds={m['seconds']} "
+             f"merge={merge} roi={roi} holds={m.get('holds')} precision={m['precision']} simulate={m['simulate']} sim_seconds={m['seconds']} "
              f"python={sys.executable} {sys.version.split()[0]} ui={ui}")
     cache.write_status(root, job_id, "running", "", chunks_done=0, chunks=len(chunks),
                        frames_done=0, frames=len(keys))
 
     progress = Progress(m.get("title", "LTX Alpha Gen"), ui)
-    tracker = Tracker(chunks, len(keys))
+    holds = m.get("holds") or [1] * len(chunks)
+    tracker = Tracker(chunks, len(keys), holds)
     ticking = threading.Event()
 
     def tick() -> None:
@@ -471,7 +478,7 @@ def main() -> int:
                        "chunks": chunks, "out_prefix": out_prefix, "colour": m.get("colour", "Bypass"),
                        "ocio_config": m.get("ocio_config", ""), "precision": m["precision"],
                        "model_dir": m["model_dir"], "unload": bool(m.get("unload", True)),
-                       "seed": int(m.get("seed", 1234))}
+                       "seed": int(m.get("seed", 1234)), "holds": holds}
             channel = ResidentChannel(m, request, progress, tracker)
         else:
             channel = SubprocessChannel(

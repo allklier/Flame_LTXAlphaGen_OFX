@@ -6,7 +6,8 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
 
 - `src/plugin.cpp`: the effect (params, layout, gate, preflight, Process, render, defaults,
   Collect Logs, job and setup watchers). `chunk_plan.*`: planner, crossfade weights, Chunk Size
-  table. `roi.*`: ROI scan and box math (pure). `cache.*`: keys, reads (mtime refresh), pending
+  table, Auto hold plan (75). `motion.*`: motion per staged frame (75, pure). `roi.*`: ROI scan
+  and box math (pure). `cache.*`: keys, reads (mtime refresh), pending
   markers, purges, age+LRU sweep, stale staging sweep.
 - `src/transport.*`: staged frame files, written with `write()`, never mmap (no SIGBUS in Flame).
 - `src/process.*`: `posix_spawn` in its own process group with a cleaned env (strips `PYTHON*`,
@@ -39,9 +40,10 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
 ## UI and outputs
 
 - **37/52.** Layout follows Flame's rules (below). Tab 1: Alpha Gen, Performance, Chunking, ROI,
-  Cache + a spacer column holding the Version label ("0.2.0 (git hash)", so a Flame test shows
-  which build is loaded) (6 columns), so Licence, Models, Support overflow to tab 2, which
-  Flame names "Setup" after the 2nd OFX page.
+  Cache, Motion (6 columns; Motion took over the spacer column and holds Frame Hold + the
+  Version label "0.2.0 (git hash)", so a Flame test shows which build is loaded), so Licence,
+  Models, Support overflow to tab 2, which Flame names "Setup" after the 2nd OFX page. Layout
+  in Flame UNVERIFIED since 74.
 - **41.** Plain string fields get a caption label above them ("Token used HH:MM, not stored").
 - **44.** Frames without a matte show a faint "no media"-style marker in the matte output: stripes
   at 0.08, caption at 0.30 (PROCESSING / NOT CONNECTED / NOT SUPPORTED; "Show Marker" off gives
@@ -87,6 +89,36 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   GPU memory info. Chosen in `process()` from the crop size; the preflight uses the chosen chunks.
   Not in the cache key (Process overwrites the whole clip). Trade-off: more seams, and the model
   may pick another main object per chunk (README warns).
+- **74. Frame Hold** Off / Auto / 2x / 4x / 8x (index stored; 8x last so it can be dropped;
+  worker side and A/B: `worker/CLAUDE.md`). A chunk keeps its size's model length:
+  `heldChunkLen` = 1 + (size − 1)/hold source frames (145 → 73/37/19), `heldOverlap` =
+  overlap/hold (min 2); the preflight gets the largest chunk's model frames. Key `|hold=k`
+  (Off = the old key), like precision. Manifest `holds[]`, one per chunk.
+- **75. Auto hold** (DECIDED, user 2026-10-17; per chunk, not mixed within a chunk: the model
+  would see the speed change). `motion.*`: while staging, each crop frame → tone-mapped luma
+  ≤ 512 px + 1/2, 1/4 pyramid; 8×8 cells (32 px at HD) block-matched to the previous frame (one
+  coarse search per 2×2 cells, then ±2/±1), occluded/ambiguous cells dropped (moved match not
+  < 60 % of no motion); frame motion = the max(3, 2 %)-th largest cell; **with an ROI only cells
+  ≥ half inside the alpha** (> 0.05): ROI mattes may be loose garbage mattes, so no edge-based
+  measure. Before Black Out. Coarse search reaches ~160 crop px (64 at f0 = 1, still above the
+  4x threshold). 5 ms per HD frame with threads (12 at UHD), on Flame's main thread.
+  `test_motion`: discs 24/64/128 px/frame read 26/66/128; a small disc in a garbage matte 64 → 64.
+  `autoHolds`: per frame max(motion to both neighbours) → < 12 px 1x, < 40 2x, else 4x (A/B),
+  spread ±4 frames; never 8x. `planAutoChunks`: uniform → the fixed plan; else greedy to the
+  model-frame budget, a chunk's hold only rises (≥ every frame's need), cut before a rise after
+  ≥ 17 frames (and room for both overlaps: no frame in three chunks), a fall runs to the budget,
+  except (user, 2026-10-17) a fall before the middle of the hold's full chunk length that doesn't
+  return to that hold within the length: cut at the middle (Full 4x: 18 of 37 frames),
+  overlap max(2, base/hold), a short last chunk reaches back to half its full length; **never
+  more model frames than the fixed plan at the highest hold found** (else that plan). Flame test
+  2026-10-17 (120 frames 720p, mostly fast): Auto 617 model frames / 298 s vs fixed 4x 580 (the
+  last chunk reached back to full length, overlapping 29 frames at 4x) → fixed: 541; Off 61.5 s;
+  "notable improvement" (user). Memory is checked before
+  staging against the 4x worst case (bounds any plan); Auto picks the chunk size the same way.
+  Weights: `frameContributions` with the base overlap. Key `|hold=auto1` (bump with the
+  thresholds). Log: motion median/max and the plan (`start+len@kx`), DEBUG motion per frame.
+  System test `auto_hold`: 60 px jumps → 1x + 4x chunks; a slow clip → the Off plan. Thresholds
+  from synthetic data only; OPEN: a tracked-camera case, real footage.
 - **62.** Merge: **Smooth** (default) = crossfade weights shaped by smoothstep
   (`frameContributions(..., smooth)`), computed here; **Flow Warp** is done by job.py
   (`worker/CLAUDE.md`). Not in the cache key.

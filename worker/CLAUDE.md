@@ -103,6 +103,32 @@ Part of the design notes (root `CLAUDE.md` has the overview and the decision ind
   side ≥ 6000 px (`ofx/CLAUDE.md` 26); `classify` turns the planner's refusal into `too_large`. Unexplored: the conv VAE
   `ltx-2.5-video-vae-conv-bf16` (1.45 GB), short 6K chunks, `--diffvae-optimization`, `--tile`.
 
+## Frame Hold (decision 74, DECIDED, user 2026-10-17)
+
+- **Why:** the video VAE folds 8 frames into one latent (32×32×8, frame 0 alone: `F' = 1 +
+  (F−1)/8`, `video_vae.py:168`, space-to-depth in `sampling.py:39-60`); the Alpha Gen LoRA keeps
+  reference and output latents 1:1 (metadata: `reference_downscale_factor 1`, no
+  `reference_temporal_scale_factor`, `iclora_utils.py:43`); the diffusion VAE decoder rebuilds 8
+  matte frames per latent. Fast motion within 8 frames → soft, lagging, jittering edges (a
+  user's report; their workaround: repeat each frame 8×, drop the copies afterwards).
+- **How:** after colour conversion, `padding.hold_indices` keeps frame 0 once and repeats every
+  later frame `hold` (2/4/8) times; after decoding `held_output_indices` keeps the middle copy.
+  Per chunk (75): `"holds"` in the request (resident, no restart), `--holds 1,4,1` or `--hold K`
+  (one-shot). job.py's Tracker weights chunks by model frames (1 + hold × (len − 1)), so the ETA
+  holds with Auto's mixed chunks, and shows "4x hold" in the progress line. `FRAME_RATE` only feeds
+  the timing embedding, not the grouping: no lever.
+- **A/B** (`tools/hold_ab.py`, HD bf16 Blackwell, 19 frames, textured fringed disc on a circle,
+  180° shutter blur, truth known): edge-band error hold 1/2/4/8 at 24 px/frame 0.022/0.016/0.014/
+  0.017, 64: 0.047/0.031/0.020/0.019, 128: 0.054/0.029/0.023/0.021; worst centroid lag 1→4×:
+  7.3→2.6, 12.1→3.9, 26.4→4.7 px (mean lag ~1 px everywhere: jitter, not offset); 4 px/frame:
+  no difference. **4× is the sweet spot**; 8× barely better. Time per 145-model-frame chunk:
+  45/89/230 s (hold 1 with 19 frames: 33 s). Pick offset: within 0.001 (middle kept).
+  `--hold 8` = external expansion in quality (edge 0.0214 vs 0.0213). Synthetic only: real
+  footage (hair) UNVERIFIED.
+- **Determinism:** the same chunk run first in two processes is bit-identical; the same input
+  run as the 4th chunk of a process differed (max 0.21, mean 0.0008). Likely state carried
+  between chunks of one process (resident worker too); cause UNVERIFIED, pre-existing.
+
 ## Resident worker (decisions 11/19/33/55)
 
 - `ltx_worker.py --serve ~/.cache/ltx-alphagen/run/worker.sock`, plus `worker.sock.json` `{pid,

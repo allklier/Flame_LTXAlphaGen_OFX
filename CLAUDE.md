@@ -48,7 +48,7 @@ Setup (helper/setup_helper.py): runtime, models, prompt cache → user config
 Other folders: `packaging/install.sh` (in the release tarball), `scripts/` (build, package,
 system test), `tools/` (`worker_smoke.py`, `job_real_smoke.py`, `resident_smoke.py`,
 `setup_smoke.sh`, `make_test_clip.py`, `measure_run.sh` (CLI VRAM/time runs), `nvml_probe.cpp`,
-`mac_bench.py`), `mlx/PORT_MAP.md` (the
+`mac_bench.py`, `hold_ab.py` (Frame Hold A/B, 74)), `mlx/PORT_MAP.md` (the
 planned MLX port), `third_party/openfx` (OpenFX `OFX_Release_1_4_TAG`, `include/` + `Support/`
 only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from CMake
 `LTXAG_VERSION` (OFX version = its major.minor), grouping "LTX".
@@ -83,17 +83,31 @@ only, BSD, `VENDORED.txt`). Plugin id `com.janklier.ltx.alphagen`, version from 
 - **69.** CLAUDE.md split per module (user: keep each under ~250 lines, 2026-10-14; not a to-do
   below that); no hidden
   documentation files (no `.claude/rules/`).
+- **73. PROPOSED (user, 2026-10-15): cloud GPU backend**, for community users without a big
+  enough GPU who may send footage online. A Setup choice (Local / Cloud), not a sister plugin:
+  colour, chunks, merge, cache, markers and progress stay local; only `job.py`'s worker channel
+  changes, and our own `ltx_worker.py` runs remotely (same recipe; no hosted Alpha Gen API
+  exists: LTX API, fal, HF providers checked 2026-10-15). User needs little more than an API key;
+  spin up, process, spin down, optional keep-warm (like Unload GPU). **RunPod Serverless first**
+  (RTX PRO 6000 96 GB, ~$3.49/hr listed; frames via its S3-compatible API on a RunPod network
+  volume, which needs a second RunPod S3 key; the volume pins the endpoint's datacenter), **AWS
+  EC2 + our AMI as the backup** (isolation in the user's own account; GPU vCPU quota starts at 0
+  and must be requested per region). Weights never in the image: Setup downloads them with the
+  user's HF token into the user's own cloud storage. OPEN: cold start, live availability, the
+  serverless progress path; a paid spike on a RunPod account first.
 
 **In `ofx/CLAUDE.md`:** 11/19 Unload GPU param · 12/32 VRAM reserve · 18/21 three-level defaults ·
 26/72 resolution limit (6K refused) · 30/61 chunks and Chunk Size · 34 no silent downgrade · 36 disk cache ·
 37/52 layout · 38 licence + model gate · 41 caption labels · 44 markers · 46 paths logged as-is ·
 48 RGBA output · 56 memory warning and record · 58 matte overlay · 59 SETUP REQUIRED on both
 outputs · 62 Merge (Smooth in C++) · 63 ROI = source alpha · 64/65 C++ platform layer and macOS
-memory · 68 effective precision (fp16) · 71 processed record: pass-through or failed render.
+memory · 68 effective precision (fp16) · 71 processed record: pass-through or failed render ·
+74 Frame Hold param, held chunks · 75 Auto hold (motion while staging, per-chunk plan).
 
 **In `worker/CLAUDE.md`:** 8/23/27/28/54 input colour (OCIO in the worker) · 9 prompt cache ·
 24 padding · 33 idle timeout · 55 resident transformer only with Unload off · 56 VRAM record
-(worker side) · 62 Flow Warp · 64 Python OS layer · 65 MPS worker · 68 fp16 worker · 72 no 6K (won't do).
+(worker side) · 62 Flow Warp · 64 Python OS layer · 65 MPS worker · 68 fp16 worker · 72 no 6K (won't do) ·
+74 Frame Hold (why: 8 frames per latent; the A/B).
 
 **In `helper/CLAUDE.md`:** 2/13/20 Setup downloads, token used once · 7 LTX packages installed by
 Setup · 51 reuse existing downloads · 57 no bundled Python packages · 60 uv-managed Python 3.14.7
@@ -144,8 +158,10 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
   links Metal + Foundation, libc++, libobjc, libSystem; signed ad hoc only (no notarisation). A CLT
   install with a stale `usr/include/c++/v1` hides the SDK's libc++ headers (`'string' file not
   found`): pass `-stdlib++-isystem <SDK>/usr/include/c++/v1` in `CMAKE_CXX_FLAGS` and
-  `CMAKE_OBJCXX_FLAGS`.
-- **Tests (ctest, 8, host-free):** `chunk_plan`, `roi`, `worker_python` (padding, transport, job
+  `CMAKE_OBJCXX_FLAGS`. A CLT update that leaves an SDK newer than its `ld` (2026-10-17: CLT 26.6,
+  `xcrun` picked a leftover MacOSX27.0.sdk; "unknown architecture" in its `.tbd` files): pass
+  `-DCMAKE_OSX_SYSROOT=<CLT>/SDKs/MacOSX.sdk`.
+- **Tests (ctest, 9, host-free):** `chunk_plan`, `roi`, `motion`, `worker_python` (padding, transport, job
   incl. Tracker, VRAM CSV, refresh marker, ROI paste-back, flow merge, `test_morph`, the hook
   against a fake `flame` module, log, Setup models), `worker_roundtrip`, `cache`, `marker_log`,
   `vram_estimate`, `load_bundle`. Real model on a GPU machine: `tools/worker_smoke.py`,
@@ -179,6 +195,10 @@ LTX licence terms (paid licence at ≥ USD 10M revenue; no separate legal read: 
   loader outside ComfyUI).
 - Watching for a process with `pgrep -f '<text>'` over ssh: it matches its own command line. Use
   marker files.
+- Staging files named `ltxag_<word>_…` from tools: any plugin load (Flame, the system test)
+  sweeps them as stale (owner pid parsed as 0, `cache.cpp:225`) and the running tool loses its
+  input. Name them `ltxag_<pid>_…` (`hold_ab.py`); `worker_smoke.py` still uses `ltxag_smoke_<pid>`.
+  Don't run the system test next to a smoke or A/B run anyway (user, 2026-10-17).
 
 ## Conventions
 

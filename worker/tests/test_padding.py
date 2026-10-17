@@ -48,6 +48,24 @@ class PaddingTest(unittest.TestCase):
         frames = np.zeros((145, 1, 1, 1), np.float16)
         self.assertIs(padding.pad_temporal(frames), frames)
 
+    def test_hold_indices(self):
+        self.assertEqual(padding.hold_indices(4, 1), [0, 1, 2, 3])
+        self.assertEqual(padding.hold_indices(3, 2), [0, 1, 1, 2, 2])
+        self.assertEqual(len(padding.hold_indices(19, 8)), 145)  # 8x: 19 source frames per 145
+        self.assertEqual(padding.hold_indices(1, 8), [0])
+        # 8x: every 8-frame latent group (frames 1..8, 9..16, ...) holds one source frame
+        idx = padding.hold_indices(19, 8)
+        for g in range(18):
+            self.assertEqual(set(idx[1 + 8 * g: 9 + 8 * g]), {g + 1})
+
+    def test_held_output_indices(self):
+        for hold in (1, 2, 4, 8):
+            for n in (1, 2, 10, 19):
+                idx, out = padding.hold_indices(n, hold), padding.held_output_indices(n, hold)
+                self.assertEqual(len(out), n)
+                self.assertEqual([idx[o] for o in out], list(range(n)), (hold, n))
+        self.assertEqual(padding.held_output_indices(3, 8), [0, 5, 13])
+
     def test_transport_roundtrip(self):
         rng = np.random.default_rng(1)
         frames = rng.random((5, 7, 9, 3)).astype(np.float16)

@@ -35,6 +35,7 @@
 
 #include "cache.h"
 #include "chunk_plan.h"
+#include "motion.h"
 #include "env_info.h"
 #include "half.h"
 #include "log.h"
@@ -84,6 +85,11 @@ const char* const kSimulations[] = {"none", "oom", "crash", "hang"};
 const char* const kChunkSizeNames[] = {"Auto", "Full (145)", "Half (73)", "Quarter (33)"};
 // Merge (decision 62): how overlapping chunks are joined.
 const char* const kMergeNames[] = {"Smooth", "Flow Warp"};
+// Frame Hold (decisions 74, 75): each frame repeated 1/2/4/8 times for fast motion; Auto (0)
+// picks 1/2/4 per chunk from the measured motion. Setups store the index: 8x stays last.
+const char* const kFrameHoldNames[] = {"Off", "Auto", "2x", "4x", "8x"};
+const int kFrameHolds[] = {1, 0, 2, 4, 8};
+constexpr int kAutoMaxHold = 4;
 
 // Params. Column (group) in brackets; see CLAUDE.md "Revised layout".
 // [Alpha Gen]
@@ -111,6 +117,8 @@ constexpr const char* kPCollectLogs = "collectLogs";
 // [Chunking]
 constexpr const char* kPChunkSize = "chunkSize";
 constexpr const char* kPMerge = "mergeMode";
+// [Motion]
+constexpr const char* kPFrameHold = "frameHold";
 // [ROI]
 constexpr const char* kPRoiMargin = "roiMargin";
 constexpr const char* kPRoiMask = "roiMaskOutside";
@@ -376,6 +384,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
     src_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
     chunkSize_ = fetchChoiceParam(kPChunkSize);
+    frameHold_ = fetchChoiceParam(kPFrameHold);
     merge_ = fetchChoiceParam(kPMerge);
     roiMargin_ = fetchIntParam(kPRoiMargin);
     roiMask_ = fetchBooleanParam(kPRoiMask);
@@ -799,6 +808,17 @@ class AlphaGenEffect : public OFX::ImageEffect {
     return dummy;
   }
 
+  int frameHoldIndex() {
+    int idx = 0;
+    frameHold_->getValue(idx);
+    return idx;
+  }
+
+  int frameHold() {
+    const int idx = frameHoldIndex();
+    return kFrameHolds[std::min(std::max(idx, 0), 4)];  // 0 = Auto
+  }
+
   // Decision 63: the ROI box and Black Out Outside ROI change the matte, so they are part of the
   // key (two nodes on one source with different ROIs must not share mattes). Without an ROI (an
   // opaque alpha) the key is the old one, so earlier caches stay valid. Chunk Size and Merge are
@@ -811,6 +831,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     precision_->getValue(prec);
     std::string sig = std::string("v1|cs=") + kColourSpaces[colour] + "|prec=" + effectivePrecision(prec) +
                       "|model=" + (useDummy() ? kDummyVersion : kModelVersion);
+    // Decisions 74/75; Off = the old key. Auto: one key part per threshold version.
+    const int hold = frameHold();
+    if (hold != 1) sig += "|hold=" + (hold == 0 ? std::string(kAutoHoldVersion) : std::to_string(hold));
     const RoiState st = roiOverride ? *roiOverride : currentRoiState();
     if (st.valid) {
       if (st.active)
@@ -889,21 +912,24 @@ class AlphaGenEffect : public OFX::ImageEffect {
 
   // Decision 61: Auto takes the longest chunk size whose estimated need fits the available
   // memory, else the smallest. Without NVML it takes Full. The overlap goes with the size.
-  int chooseChunkSize(int mode, bool fp8, int w, int h, int frames, bool resident, double head) {
+  // With a Frame Hold (74) the model frames of a chunk are what counts.
+  int chooseChunkSize(int mode, bool fp8, int w, int h, int frames, bool resident, double head, int hold) {
     if (mode > 0) return mode - 1;
     const VramInfo v = queryVram();
     if (!v.ok) return 0;
     unsigned pid = 0;
     const double available = v.freeGB + residentWorkerGB(pid) - head;
     for (int s = 0; s < kChunkSizes; ++s) {
-      const double need = estimateVramNeed(fp8, w, h, std::min(kSizeLen[s], frames), resident, kMps).gb;
+      const double need =
+          estimateVramNeed(fp8, w, h, heldModelFrames(std::min(heldChunkLen(s, hold), frames), hold), resident, kMps).gb;
       LOGI("chunk size auto: %d frames/chunk needs %.1f GB, available %.1f GB", kSizeLen[s], need, available);
       if (need <= available) return s;
     }
     return kChunkSizes - 1;
   }
 
-  bool preflight(const std::vector<Chunk>& chunks, int w, int h, std::string& vramJson) {
+  // modelFrames: of the largest chunk, holds included (74/75).
+  bool preflight(int modelFrames, int w, int h, std::string& vramJson) {
     int prec = 0;
     double head = 0.0, simNeed = 0.0;
     bool unload = true;
@@ -911,17 +937,15 @@ class AlphaGenEffect : public OFX::ImageEffect {
     headroom_->getValue(head);
     unload_->getValue(unload);
     simNeed_->getValue(simNeed);
-    int longest = 0;
-    for (const auto& c : chunks) longest = std::max(longest, c.len);
-    const VramNeed est = estimateVramNeed(prec == 1, w, h, longest, !unload, kMps);
+    const VramNeed est = estimateVramNeed(prec == 1, w, h, modelFrames, !unload, kMps);
     const double need = simNeed > 0.0 ? simNeed : est.gb;
     const VramInfo v = queryVram();
     unsigned workerPid = 0;
     const double reusable = residentWorkerGB(workerPid);
     const double available = v.freeGB + reusable - head;
-    LOGI("preflight: %s %dx%d longest chunk %d -> model %dx%dx%d, need %.1f GB%s; free %.1f + resident "
+    LOGI("preflight: %s %dx%d largest chunk %d model frames -> model %dx%dx%d, need %.1f GB%s; free %.1f + resident "
          "%.1f - reserve %.1f = %.1f GB available (nvml %s)",
-         effectivePrecision(prec).c_str(), w, h, longest, est.modelW, est.modelH, est.modelFrames, need,
+         effectivePrecision(prec).c_str(), w, h, modelFrames, est.modelW, est.modelH, est.modelFrames, need,
          simNeed > 0.0 ? " (simulated)" : "", v.freeGB, reusable, head, available, v.ok ? "ok" : "unavailable");
     bool warned = false;
     if (v.ok && need > available) {
@@ -1020,21 +1044,32 @@ class AlphaGenEffect : public OFX::ImageEffect {
     headroom_->getValue(head);
     chunkSize_->getValue(chunkMode);
     merge_->getValue(mergeMode);
-    const int sizeIdx = chooseChunkSize(chunkMode, prec == 1, roi.box.w, roi.box.h, n, !unload, head);
-    const int chunkLen = kSizeLen[sizeIdx], overlap = kSizeOverlap[sizeIdx];
-    const auto chunks = planChunks(n, chunkLen, overlap);
-    LOGI("process: chunk size %s -> %d frames, overlap %d; merge %s", kChunkSizeNames[chunkMode],
-         chunkLen, overlap, kMergeNames[mergeMode]);
+    // Frame Hold (74/75). Auto plans its chunks after staging, from the motion measured while
+    // staging; memory is checked before that against the worst case (4x), which bounds any plan.
+    const int hold = frameHold();
+    const int planHold = hold == 0 ? kAutoMaxHold : hold;
+    const int sizeIdx = chooseChunkSize(chunkMode, prec == 1, roi.box.w, roi.box.h, n, !unload, head, planHold);
+    const int overlap = hold == 0 ? kSizeOverlap[sizeIdx] : heldOverlap(sizeIdx, hold);
+    std::vector<Chunk> chunks;
+    int modelFrames = std::min(kSizeLen[sizeIdx], heldModelFrames(n, planHold));
+    if (hold != 0) {
+      chunks = planChunks(n, heldChunkLen(sizeIdx, hold), overlap);
+      modelFrames = 0;
+      for (auto& c : chunks) c.hold = hold, modelFrames = std::max(modelFrames, heldModelFrames(c.len, hold));
+    }
+    LOGI("process: chunk size %s -> %d model frames, overlap %d; frame hold %s; merge %s",
+         kChunkSizeNames[chunkMode], kSizeLen[sizeIdx], overlap, kFrameHoldNames[std::min(4, std::max(0, frameHoldIndex()))],
+         kMergeNames[mergeMode]);
     std::string vramJson;
-    if (!preflight(chunks, roi.box.w, roi.box.h, vramJson)) return;
+    if (!preflight(modelFrames, roi.box.w, roi.box.h, vramJson)) return;
     const std::string sig = paramSignature(&roi);
     const std::string root = cacheRoot();
     const std::string jobId = std::to_string(getpid()) + "-" + std::to_string(gJobSeq++) + "-" +
                               std::to_string(std::time(nullptr));
     LogScope scope(nodeId_, jobId);
     const std::string input = stagingDir() + "/ltxag_job_" + jobId + "_in.bin";
-    LOGI("process: t=%g clip [%d,%d] %d frames, %d chunk(s), params %s", time, first,
-         first + n - 1, n, int(chunks.size()), sig.c_str());
+    LOGI("process: t=%g clip [%d,%d] %d frames, %s chunk(s), params %s", time, first, first + n - 1, n,
+         hold == 0 ? "auto" : std::to_string(chunks.size()).c_str(), sig.c_str());
 
     std::vector<std::string> keys(n);
     int w = 0, h = 0;
@@ -1042,6 +1077,9 @@ class AlphaGenEffect : public OFX::ImageEffect {
     FrameWriter writer;
     std::vector<float> rgb, maskRow;
     std::vector<uint16_t> frame;
+    std::unique_ptr<MotionAnalyzer> analyzer;  // Auto Frame Hold (75)
+    if (hold == 0) analyzer.reset(new MotionAnalyzer(cw, ch));
+    std::vector<double> motion(n, 0.0);
     const auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < n; ++f) {
       std::unique_ptr<OFX::Image> img;
@@ -1085,14 +1123,18 @@ class AlphaGenEffect : public OFX::ImageEffect {
         const auto* p = static_cast<const float*>(img->getPixelAddress(b.x1 + roi.box.x, b.y2 - 1 - srcRow));
         for (int x = 0; x < cw; ++x)
           for (int k = 0; k < 3; ++k) rgb[size_t(x) * 3 + k] = p[size_t(x) * sc + k];
-        if (blackOut) {
+        if (useRoi && (blackOut || analyzer))
           roiRowAlpha(static_cast<const float*>(img->getPixelAddress(b.x1, b.y2 - 1 - srcRow)), sc, w,
                       maskRow.data());
+        // Motion on the picture before Black Out, inside the ROI matte (75).
+        if (analyzer) analyzer->addRow(row, rgb.data(), useRoi ? maskRow.data() + roi.box.x : nullptr);
+        if (blackOut) {
           for (int x = 0; x < cw; ++x)
             for (int k = 0; k < 3; ++k) rgb[size_t(x) * 3 + k] *= maskRow[size_t(roi.box.x + x)];
         }
         floatToHalf(rgb.data(), frame.data() + size_t(row) * cw * 3, rgb.size());
       }
+      if (analyzer) motion[f] = analyzer->endFrame();
       keys[f] = matteKey(hashImage(*img), sig);
       if (!writer.writeFrame(frame.data(), err)) {
         writer.close();
@@ -1105,6 +1147,23 @@ class AlphaGenEffect : public OFX::ImageEffect {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     LOGI("process: staged %d frames in %.2f s (%.1f ms/frame), %.1f MB in %s", n, sec,
          1000.0 * sec / n, double(n) * cw * ch * 6 / 1048576.0, input.c_str());
+    if (hold == 0) {
+      chunks = planAutoChunks(autoHolds(motion), sizeIdx);
+      std::vector<double> sorted(motion.begin() + 1, motion.end());
+      std::sort(sorted.begin(), sorted.end());
+      std::string plan;
+      const int total = planModelFrames(chunks);
+      for (const auto& c : chunks)
+        plan += (plan.empty() ? "" : " ") + std::to_string(c.start) + "+" + std::to_string(c.len) + "@" +
+                std::to_string(c.hold) + "x";
+      LOGI("process: auto hold: motion px/frame median %.1f, max %.1f; %d chunk(s) %s; %d model frames "
+           "for %d frames",
+           sorted.empty() ? 0.0 : sorted[sorted.size() / 2], sorted.empty() ? 0.0 : sorted.back(),
+           int(chunks.size()), plan.c_str(), total, n);
+      std::string per;
+      for (int f = 1; f < n; ++f) per += (f > 1 ? " " : "") + std::to_string(int(std::lround(motion[f])));
+      LOGD("process: auto hold: motion per frame %s", per.c_str());
+    }
 
     double seconds = 10.0;
     int sim = 0;
@@ -1120,6 +1179,8 @@ class AlphaGenEffect : public OFX::ImageEffect {
        << ",\"frames\":" << n << ",\"chunks\":[";
     for (size_t c = 0; c < chunks.size(); ++c)
       js << (c ? "," : "") << "[" << chunks[c].start << "," << chunks[c].len << "]";
+    js << "],\"holds\":[";
+    for (size_t c = 0; c < chunks.size(); ++c) js << (c ? "," : "") << chunks[c].hold;
     js << "],\"frame_keys\":[";
     for (int f = 0; f < n; ++f) js << (f ? "," : "") << jsonStr(keys[f]);
     js << "],\"contrib\":[";
@@ -1403,6 +1464,7 @@ class AlphaGenEffect : public OFX::ImageEffect {
   OFX::Clip* src_;
   OFX::Clip* dst_;
   OFX::ChoiceParam* chunkSize_;
+  OFX::ChoiceParam* frameHold_;
   OFX::ChoiceParam* merge_;
   OFX::IntParam* roiMargin_;
   OFX::BooleanParam* roiMask_;
@@ -1638,12 +1700,21 @@ class AlphaGenFactory : public OFX::PluginFactoryHelper<AlphaGenFactory> {
     place(*button(kPPurgeAll, "Purge All", "Delete every cached matte of every node and project."),
           gCache);
 
-    // --- Spacers (decision 52): Flame ignores page membership and starts a new tab only when
-    // the current one passes 6 columns. One blank column fills tab 1 (Alpha Gen,
-    // Performance, Chunking, ROI, Cache + 1), so Licence/Models overflow to tab 2, which Flame names after
-    // the next page ("Setup"). The spacer holds one label so Flame cannot drop it: the version,
-    // so a test in Flame shows which build is loaded.
-    place(*label("version", "Version", LTXAG_VERSION " (" LTXAG_GIT ")"), group("grpSpacer0", " ", main));
+    // --- Motion (3 rows; decisions 52, 74): the 6th column of tab 1 (Alpha Gen, Performance,
+    // Chunking, ROI, Cache, Motion), so Licence/Models overflow to tab 2, which Flame names after
+    // the next page ("Setup"). It took over the spacer column, and keeps its Version label, so a
+    // test in Flame shows which build is loaded.
+    auto* gMotion = group("grpMotion", "Motion", main);
+    auto* hold = labelled(desc.defineChoiceParam(kPFrameHold), "Frame Hold",
+                          "For fast motion. The model packs 8 frames into one step, so motion "
+                          "within 8 frames can blur the matte. 2x/4x/8x repeat each frame so a "
+                          "step holds 4/2/1 source frames; processing takes about 2/4/8 times as long. "
+                          "Auto measures the motion (inside the ROI alpha, if any) and holds only "
+                          "the chunks that need it.");
+    for (const char* c : kFrameHoldNames) hold->appendOption(c);
+    hold->setDefault(0);
+    place(*hold, gMotion);
+    place(*label("version", "Version", LTXAG_VERSION " (" LTXAG_GIT ")"), gMotion);
 
     // --- Licence (5 rows, per user) ---
     auto* gLic = group("grpLicence", "Licence", setupPage);
