@@ -6,11 +6,13 @@ Generate an alpha matte from an RGB clip, directly in Flame, using Lightricks'
 **LTX-2.5 Alpha Gen** IC-LoRA. It runs locally on your own GPU: NVIDIA on Linux, or Apple
 Silicon on macOS. There is no cloud service and no ComfyUI.
 
-> **Status: v0.2.** The plugin works in Flame and has produced good mattes on real footage.
+> **Status: v0.2.1.** The plugin works in Flame and has produced good mattes on real footage.
 > Setup is guided, and the viewer refreshes by itself when a job finishes. Since 0.1.4: **macOS
 > on Apple Silicon** (much slower than a large NVIDIA GPU; see [macOS](#macos-apple-silicon));
 > since 0.1.5: about 1.4× faster processing on M1-family Macs (an fp16 copy of the model); new in
-> 0.2: a processed node whose matte goes missing shows MATTE MISSING instead of passing through.
+> 0.2: a processed node whose matte goes missing shows MATTE MISSING instead of passing through;
+> new in 0.2.1: **Frame Hold** for clips with fast motion (sharper, steadier edges; `Auto` holds
+> only the parts that need it, see [Motion](#motion)).
 > See [Status and roadmap](#status-and-roadmap) for what is not built yet.
 
 ## How long does it take?
@@ -201,8 +203,8 @@ installed later, per user, from inside Flame (see [Setup](#setup)).
 3. Run the installer with sudo (it writes to Flame's OFX folder):
 
    ```
-   tar xzf LTXAlphaGen-0.2.0-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
-   cd LTXAlphaGen-0.2.0
+   tar xzf LTXAlphaGen-0.2.1-rocky9.tar.gz     # or ...-macos-arm64.tar.gz
+   cd LTXAlphaGen-0.2.1
    sudo ./install.sh
    ```
 
@@ -371,6 +373,22 @@ shared by all your nodes and projects; the others are saved with each node.
     so an edge that the chunks disagree on moves from one position to the other instead of
     showing a ghost. It takes a few seconds per seam, small next to the model time. It does not
     fix a switch of the main object (see How it works).
+
+### Motion
+
+- **Frame Hold**: for fast motion. The model packs 8 frames into each of its time steps, so an
+  edge that moves a long way within 8 frames can come out soft, lagging or jittery. `2x`, `4x`
+  and `8x` repeat each frame so a time step holds 4, 2 or 1 source frames; the copies are
+  dropped again, so the output has the clip's own frames. In our tests (synthetic motion of
+  24–128 pixels per frame) `4x` removed most of the edge error and `8x` added little. On longer
+  clips processing takes about 2, 4 and 8 times as long, and a chunk holds fewer frames (Full:
+  73, 37, 19), so a clip has more seams. `Auto` measures the motion while Process reads the
+  frames and holds only the chunks that need it (2x from about 12 pixels per frame, 4x from
+  about 40); slow parts of the clip run at normal speed. With an ROI alpha, Auto looks at the
+  motion inside it, so a rough garbage matte around the subject is enough. Changing the setting
+  needs a new Process; the mattes of each setting are cached separately. `Off` (default) is
+  right for most shots.
+- **Version**: the plugin's version and build, shown for support.
 
 ### ROI (Alpha)
 
